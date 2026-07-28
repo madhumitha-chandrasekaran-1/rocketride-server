@@ -580,7 +580,8 @@
 		"temperature": {
 			"type": "number",
 			"title": "Temperature",
-			"description": "Sampling temperature for non-reasoning models: 0 is generally more deterministic, higher values increase variety. Ignored for reasoning models (o1, o3, GPT-5 reasoning variants, ...), which OpenAI's Responses API controls separately. Defaults to 0.",
+			"description": "Sampling temperature for non-reasoning models: 0 is generally more deterministic, higher values increase variety. Ignored for reasoning models (o1, o3, GPT-5 reasoning variants, ...), which OpenAI's Responses API controls separately.",
+			"default": 0,
 			"minimum": 0,
 			"maximum": 2
 		},
