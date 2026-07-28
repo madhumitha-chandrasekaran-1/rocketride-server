@@ -11,9 +11,10 @@ answer out.
 
 Built on **langchain-openai** (`ChatOpenAI`) with the **openai** SDK underneath.
 Non-reasoning models are invoked through the Chat Completions API with `max_tokens` set to
-the profile's output-token limit. `temperature` is configurable (default `0`, so responses
-are deterministic unless raised); it is ignored for reasoning models, which OpenAI's
-Responses API controls separately.
+the profile's output-token limit. `temperature` is configurable (default `0`, which is
+generally more deterministic than higher values, though OpenAI does not guarantee identical
+output for identical input); it is ignored for reasoning models, which OpenAI's Responses
+API controls separately.
 
 Reasoning-capable models (flagged via `capabilities.reasoning` in the model configuration)
 are routed through the **OpenAI Responses API** instead, using `max_completion_tokens`.
