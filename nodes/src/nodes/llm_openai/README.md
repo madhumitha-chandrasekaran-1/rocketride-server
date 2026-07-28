@@ -10,9 +10,10 @@ model, and can also be wired directly via lanes: send a question in, receive a g
 answer out.
 
 Built on **langchain-openai** (`ChatOpenAI`) with the **openai** SDK underneath.
-Non-reasoning models are invoked through the Chat Completions API with `temperature: 0`
-and `max_tokens` set to the profile's output-token limit, so responses are deterministic
-by default.
+Non-reasoning models are invoked through the Chat Completions API with `max_tokens` set to
+the profile's output-token limit. `temperature` is configurable (default `0`, so responses
+are deterministic unless raised); it is ignored for reasoning models, which OpenAI's
+Responses API controls separately.
 
 Reasoning-capable models (flagged via `capabilities.reasoning` in the model configuration)
 are routed through the **OpenAI Responses API** instead, using `max_completion_tokens`.
@@ -48,10 +49,11 @@ errors are not, and are mapped to friendly messages (e.g. `Invalid API key.`).
 | `model`            | string | OpenAI model name. Only editable in the `custom` profile.                                |
 | `modelTotalTokens` | number | Total token (context) limit. Only editable in the `custom` profile (default `16384`). Must be greater than 0. |
 | `modelSource`      | enum   | Where the model is hosted (standard cloud-LLM field, default `provider`).                |
+| `temperature`      | number | Sampling temperature for non-reasoning models (default `0`). Available for every profile. Ignored by reasoning models. |
 
-Preconfigured profiles only expose `apikey` and `modelSource`; the model name and token
-limits come from the profile. The `custom` profile additionally exposes `model` and
-`modelTotalTokens` for any OpenAI model not in the list.
+Preconfigured profiles only expose `apikey`, `modelSource`, and `temperature`; the model
+name and token limits come from the profile. The `custom` profile additionally exposes
+`model` and `modelTotalTokens` for any OpenAI model not in the list.
 
 ---
 
