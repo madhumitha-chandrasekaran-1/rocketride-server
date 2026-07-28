@@ -50,7 +50,7 @@ errors are not, and are mapped to friendly messages (e.g. `Invalid API key.`).
 | `model`            | string | OpenAI model name. Only editable in the `custom` profile.                                |
 | `modelTotalTokens` | number | Total token (context) limit. Only editable in the `custom` profile (default `16384`). Must be greater than 0. |
 | `modelSource`      | enum   | Where the model is hosted (standard cloud-LLM field, default `provider`).                |
-| `temperature`      | number | Sampling temperature for non-reasoning models (default `0`). Available for every profile. Ignored by reasoning models. |
+| `temperature`      | number | Sampling temperature for non-reasoning models, range `0`-`2` (default `0`). Available for every profile. Ignored by reasoning models. |
 
 Preconfigured profiles only expose `apikey`, `modelSource`, and `temperature`; the model
 name and token limits come from the profile. The `custom` profile additionally exposes
