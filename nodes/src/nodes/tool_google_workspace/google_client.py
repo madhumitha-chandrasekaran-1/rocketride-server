@@ -147,24 +147,46 @@ def resolve_token_uri(svc: GoogleService, token_uri: object) -> str:
     return token_uri
 
 
+def _structured_errors(exc: Exception) -> list[dict]:
+    """Parse the JSON error body's ``error.errors[]`` list, or ``[]`` if absent/malformed."""
+    content = getattr(exc, 'content', b'') or b''
+    if isinstance(content, bytes):
+        content = content.decode('utf-8', 'replace')
+    try:
+        errors = (json.loads(content).get('error') or {}).get('errors') or []
+        return [e for e in errors if isinstance(e, dict)]
+    except (ValueError, AttributeError, TypeError):
+        return []
+
+
+def _error_reason_code(exc: Exception) -> str | None:
+    """The first structured reason code verbatim (e.g. 'accessNotConfigured'), if present.
+
+    Google distinguishes ``accessNotConfigured`` (API disabled on the project),
+    ``forbidden`` (permission), and ``rateLimitExceeded``/``quotaExceeded`` under the
+    same HTTP 403 — the reason code is what actually names the fix.
+    """
+    for e in _structured_errors(exc):
+        if e.get('reason'):
+            return str(e['reason'])
+    return None
+
+
 def _is_rate_limit_403(exc: Exception) -> bool:
     """True when a 403 is a transient rate/quota limit (safe to retry) vs a permission error."""
     status = getattr(getattr(exc, 'resp', None), 'status', None)
     if not status or int(status) != 403:
         return False
     rate_reasons = {'ratelimitexceeded', 'userratelimitexceeded', 'quotaexceeded'}
+    structured = _structured_errors(exc)
+    # Prefer the structured error body (error.errors[].reason) over substring matching.
+    if structured:
+        reasons = {str(e.get('reason', '')).lower() for e in structured}
+        return bool(reasons & rate_reasons)
+    # Fallback for non-JSON bodies and transport-level wrappers.
     content = getattr(exc, 'content', b'') or b''
     if isinstance(content, bytes):
         content = content.decode('utf-8', 'replace')
-    # Prefer the structured error body (error.errors[].reason) over substring matching.
-    try:
-        errors = (json.loads(content).get('error') or {}).get('errors') or []
-        reasons = {str(e.get('reason', '')).lower() for e in errors if isinstance(e, dict)}
-        if reasons:
-            return bool(reasons & rate_reasons)
-    except (ValueError, AttributeError, TypeError):
-        pass
-    # Fallback for non-JSON bodies and transport-level wrappers.
     blob = (str(getattr(exc, 'reason', '') or '') + ' ' + content).lower()
     return any(reason in blob for reason in rate_reasons)
 
@@ -417,12 +439,20 @@ def execute(svc: GoogleService, request: Any, *, binary: bool = False) -> Any:
                 _time.sleep(base_delay * (2**attempt))
                 continue
             detail = getattr(exc, 'reason', None) or str(exc)
-            if status and int(status) == 403:
-                raise ValueError(
-                    f'{svc.product} API 403: {detail}. If this is a scope error, disconnect '
-                    'and reconnect your Google account with the required access tier. If it is a '
-                    'sharing/ownership error, the account may lack permission on that resource.'
-                ) from exc
-            prefix = f'{svc.product} API {status}: ' if status else f'{svc.product} request failed: '
-            raise ValueError(f'{prefix}{detail}') from exc
+            reason_code = _error_reason_code(exc)
+            status_int = int(status) if status else None
+            if status_int == 403:
+                err = ValueError(
+                    f'{svc.product} API 403 ({reason_code or "forbidden"}): {detail}. If this is a scope '
+                    'error, disconnect and reconnect your Google account with the required access tier. '
+                    'If it is a sharing/ownership error, the account may lack permission on that resource. '
+                    'If it is accessNotConfigured, the Google Cloud project behind this credential has not '
+                    'enabled this API.'
+                )
+            else:
+                prefix = f'{svc.product} API {status}: ' if status else f'{svc.product} request failed: '
+                err = ValueError(f'{prefix}{detail}')
+            err.status = status_int
+            err.reason_code = reason_code
+            raise err from exc
     raise RuntimeError('execute: retry loop exhausted unexpectedly')  # unreachable

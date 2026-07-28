@@ -53,7 +53,7 @@ operation and lives in `tool_drive`.
   - `table_insert` — insert an empty `rows`×`columns` table at the end of the
     body (`insertTable`); `rows` is clamped to 1..1000 and `columns` to 1..25.
 - **Diagnostics:** `check_connection` verifies that granted OAuth scopes cover
-  the configured access tier.
+  the configured access tier and probes the Docs API.
 
 The entire Docs v1 surface is `documents().get` / `create` / `batchUpdate`; the
 wrappers are conveniences over `batch_update`.

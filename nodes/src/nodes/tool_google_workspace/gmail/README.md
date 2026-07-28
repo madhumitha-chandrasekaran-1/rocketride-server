@@ -38,6 +38,8 @@ enabled—permanently delete.
 - **Permanent delete (gated):** `message_delete`, `messages_batchDelete` —
   require `allowHardDelete` **and** the `full` tier; batch ops take an explicit
   id list (never a query), capped at 1000 per call.
+- **Diagnostics:** `check_connection` verifies that granted OAuth scopes cover
+  the configured access tier and probes the Gmail API.
 
 Operational targets (`messageId`, `threadId`, `labelId`, `query`) are always
 tool-call parameters, never node config. Outputs are cleaned shapes (ids,

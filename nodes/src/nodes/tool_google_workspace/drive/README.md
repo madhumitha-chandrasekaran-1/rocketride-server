@@ -44,7 +44,8 @@ operation sets `supportsAllDrives` so shared-drive items work transparently.
   `file_trash`, `file_untrash`, `folder_create`, `permission_update`,
   `permission_delete`, `permission_create`.
 - **Gated:** `file_delete` (permanent delete).
-- **Diagnostics:** `check_connection` verifies granted scopes cover the tier.
+- **Diagnostics:** `check_connection` verifies granted scopes cover the tier
+  and probes the Drive API.
 
 ### Download vs. export (native files)
 

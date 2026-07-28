@@ -310,12 +310,37 @@ def test_default_tier_is_write():
 # ---------------------------------------------------------------------------
 
 
+class _HttpErr(Exception):
+    def __init__(self, status, reason, content=b''):
+        super().__init__(reason)
+        self.resp = types.SimpleNamespace(status=status)
+        self.reason = reason
+        self.content = content
+
+
 def test_check_connection_reports_ok():
     inst = _make()
     out = inst.check_connection({})
     assert out['connection_ok'] is True
     assert out['access'] == 'write'
     assert any('spreadsheets' in s for s in out['requiredScopes'])
+    assert inst.IGlobal.service.call_for('get') is not None
+
+
+def test_check_connection_probe_swallows_expected_404():
+    """A 404 on the probe's made-up spreadsheet id proves the Sheets API IS reachable."""
+    inst = _make(results={'get': _HttpErr(404, 'notFound')})
+    out = inst.check_connection({})
+    assert out['connection_ok'] is True
+
+
+def test_check_connection_reports_probe_failure():
+    """A disabled Sheets API (accessNotConfigured) must flip connection_ok, not be swallowed."""
+    err = _HttpErr(403, 'accessNotConfigured', content=b'{"error": {"errors": [{"reason": "accessNotConfigured"}]}}')
+    inst = _make(results={'get': err})
+    out = inst.check_connection({})
+    assert out['connection_ok'] is False
+    assert out['errorReason'] == 'accessNotConfigured'
 
 
 def test_check_connection_reports_missing_user_oauth_scope(monkeypatch):

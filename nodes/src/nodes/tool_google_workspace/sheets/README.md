@@ -50,7 +50,7 @@ deletion is a Drive operation and lives in `tool_drive`.
   `sheet_duplicate` are convenience wrappers over the same endpoint;
   `sheet_copy_to` is the separate `spreadsheets.sheets.copyTo` endpoint.
 - **Diagnostics:** `check_connection` verifies that granted OAuth scopes cover
-  the configured access tier.
+  the configured access tier and probes the Sheets API.
 
 ## Setup
 
