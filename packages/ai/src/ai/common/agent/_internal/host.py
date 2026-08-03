@@ -180,10 +180,21 @@ class AgentHostServices:
             for guard_node in self._guard_nodes:
                 param = IInvokeGuard.Check(mode=mode, text=text)
                 self._invoker.instance.invoke(param, component_id=guard_node)
-                result = getattr(param, 'result', None) or {}
+
+                # A guard's result must be a mapping to be trusted at all; a
+                # malformed shape (list/string/None/anything else) falls
+                # through to the "no recognized action" fail-closed branch
+                # below rather than crashing on .get() with an AttributeError.
+                raw_result = getattr(param, 'result', None)
+                result = raw_result if isinstance(raw_result, dict) else {}
                 action = result.get('action')
+
                 if action == 'block':
-                    violations = ', '.join(v.get('rule', '?') for v in result.get('violations', []))
+                    raw_violations = result.get('violations')
+                    violations_list = raw_violations if isinstance(raw_violations, list) else []
+                    violations = ', '.join(
+                        v.get('rule', '?') if isinstance(v, dict) else str(v) for v in violations_list
+                    )
                     raise ValueError(f'Guardrails blocked tool {tool_name!r} ({mode}): {violations}')
                 if action not in ('pass', 'warn', 'log'):
                     raise ValueError(

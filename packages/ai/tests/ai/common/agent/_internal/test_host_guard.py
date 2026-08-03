@@ -275,3 +275,39 @@ class TestGuardFailsClosedOnMalformedResult:
             tools.invoke(tool_name, {'text': 'hello team'})
 
         assert instance.tool_invoked is False
+
+    @pytest.mark.parametrize('malformed_result', [[], ['block'], 'block', None, 42])
+    def test_non_mapping_result_blocks_without_crashing(self, host_module, malformed_result):
+        """A guard result that isn't a dict must fail closed with ValueError, not AttributeError."""
+        tools, instance, tool_name = _build_tools(
+            host_module, guard_nodes=['guardrails_1'], guard_check=lambda mode, text: malformed_result
+        )
+
+        with pytest.raises(ValueError, match='no recognized action'):
+            tools.invoke(tool_name, {'text': 'hello team'})
+
+        assert instance.tool_invoked is False
+
+    def test_block_with_non_list_violations_does_not_crash(self, host_module):
+        tools, instance, tool_name = _build_tools(
+            host_module,
+            guard_nodes=['guardrails_1'],
+            guard_check=lambda mode, text: {'action': 'block', 'violations': 'not a list'},
+        )
+
+        with pytest.raises(ValueError, match='Guardrails blocked'):
+            tools.invoke(tool_name, {'text': 'hello team'})
+
+        assert instance.tool_invoked is False
+
+    def test_block_with_non_dict_violation_items_does_not_crash(self, host_module):
+        tools, instance, tool_name = _build_tools(
+            host_module,
+            guard_nodes=['guardrails_1'],
+            guard_check=lambda mode, text: {'action': 'block', 'violations': ['pii_leak', 123]},
+        )
+
+        with pytest.raises(ValueError, match='Guardrails blocked.*pii_leak, 123'):
+            tools.invoke(tool_name, {'text': 'hello team'})
+
+        assert instance.tool_invoked is False
