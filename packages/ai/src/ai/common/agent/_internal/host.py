@@ -13,11 +13,22 @@ plan in plans/elegant-cooking-finch.md for the architectural rationale.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from rocketlib import ToolDescriptor
-from rocketlib.types import IInvokeOp, IInvokeTool, IInvokeMemory
+from rocketlib.types import IInvokeOp, IInvokeTool, IInvokeMemory, IInvokeGuard
+
+
+def _guard_text(value: Any) -> str:
+    """Flatten a tool call's args or output to text for a guard check."""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, default=str)
+    except Exception:
+        return str(value)
 
 
 class AgentHostServices:
@@ -67,6 +78,7 @@ class AgentHostServices:
             self._invoker = invoker
             self._tool_list: Dict[str, Any] = {}
             self._tool_nodes: List[str] = self._invoker.instance.getControllerNodeIds('tool')
+            self._guard_nodes: List[str] = self._invoker.instance.getControllerNodeIds('guard')
 
             # For every tool node
             for tool_node in self._tool_nodes:
@@ -137,6 +149,39 @@ class AgentHostServices:
             # And return the bare list of tool descriptors (not the full node response)
             return tool_list
 
+        def _run_guard(self, mode: str, value: Any, *, tool_name: str) -> None:
+            """Run every guard node attached to this agent against a tool call.
+
+            ``mode='output'`` checks the args about to be sent to a tool —
+            agent-generated content on its way out (PII, content-safety,
+            hallucination). ``mode='input'`` checks a tool's result before
+            it flows back into the agent — the indirect-prompt-injection-
+            into-tool-use case. This is inverted from what the mode names
+            suggest at first glance because it mirrors the *direction of
+            travel* relative to the agent, not the tool.
+
+            Raises:
+                ValueError: If any attached guard's `policy_mode` blocks
+                    this text. The exception surfaces to the calling
+                    framework driver as a tool error, so the tool never
+                    runs (pre-check) or its result never reaches the
+                    agent (post-check).
+            """
+            if not self._guard_nodes:
+                return
+
+            text = _guard_text(value)
+            if not text.strip():
+                return
+
+            for guard_node in self._guard_nodes:
+                param = IInvokeGuard.Check(mode=mode, text=text)
+                self._invoker.instance.invoke(param, component_id=guard_node)
+                result = getattr(param, 'result', None) or {}
+                if result.get('action') == 'block':
+                    violations = ', '.join(v.get('rule', '?') for v in result.get('violations', []))
+                    raise ValueError(f'Guardrails blocked tool {tool_name!r} ({mode}): {violations}')
+
         def validate(self, tool_name: str, input: Any) -> None:
             """
             Validate tool input without executing the tool.
@@ -174,6 +219,10 @@ class AgentHostServices:
             if tool_name not in self._tool_list:
                 raise ValueError(f'Tool {tool_name} not found in tool catalog')
 
+            # Guard the outbound call: block before it reaches the tool if
+            # the args (agent-generated content) fail policy.
+            self._run_guard('output', args, tool_name=tool_name)
+
             # Build the invoke using the original (un-prefixed) name so the
             # provider's _owns_tool() match works.
             entry = self._tool_list[tool_name]
@@ -183,7 +232,13 @@ class AgentHostServices:
             self._invoker.instance.invoke(param, component_id=entry['node_id'])
 
             # And return the output
-            return getattr(param, 'output', None)
+            output = getattr(param, 'output', None)
+
+            # Guard the inbound result: block before it reaches the agent
+            # if the tool's response fails policy (indirect prompt injection).
+            self._run_guard('input', output, tool_name=tool_name)
+
+            return output
 
     class Memory:
         """Memory host interface backed by IInvokeMemory operations."""

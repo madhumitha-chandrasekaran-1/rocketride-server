@@ -1,0 +1,237 @@
+# =============================================================================
+# MIT License
+# Copyright (c) 2026 Aparavi Software AG
+# =============================================================================
+
+"""
+Unit tests for guard-node enforcement in ``AgentHostServices.Tools`` (host.py).
+
+Covers the control-plane guard attachment from issue #1792: a ``guard`` node
+attached via ``control`` to an agent should gate every tool call the agent
+makes (args pre-check, result post-check), without needing a lane connection
+between the tool and the guard.
+
+The real ``rocketlib``/``rocketlib.types`` require the compiled C++ engine
+(``engLib``), which isn't available in a plain test environment. This stubs
+both modules with lightweight equivalents so ``host.py`` can be exercised in
+isolation — the same technique ``nodes/test/guardrails/test_all.py`` uses for
+``IInstance.py``.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import sys
+import types
+
+import pytest
+
+_HOST_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    '..',
+    '..',
+    '..',
+    '..',
+    '..',
+    'src',
+    'ai',
+    'common',
+    'agent',
+    '_internal',
+    'host.py',
+)
+
+
+class _IInvokeOp:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+def _make_rocketlib_stubs():
+    """Build minimal `rocketlib` / `rocketlib.types` stand-ins for host.py."""
+    rocketlib_stub = types.ModuleType('rocketlib')
+    rocketlib_stub.ToolDescriptor = dict
+
+    rocketlib_types_stub = types.ModuleType('rocketlib.types')
+
+    class IInvokeTool:
+        class Query(_IInvokeOp):
+            def __init__(self, **kwargs):
+                super().__init__(tools=[], **kwargs)
+
+        class Invoke(_IInvokeOp):
+            def __init__(self, **kwargs):
+                super().__init__(output=None, **kwargs)
+
+        class Validate(_IInvokeOp):
+            pass
+
+    class IInvokeMemory:
+        class Put(_IInvokeOp):
+            pass
+
+        class Get(_IInvokeOp):
+            pass
+
+        class List(_IInvokeOp):
+            pass
+
+        class Clear(_IInvokeOp):
+            pass
+
+    class IInvokeGuard:
+        class Check(_IInvokeOp):
+            def __init__(self, **kwargs):
+                super().__init__(result=None, **kwargs)
+
+    rocketlib_types_stub.IInvokeOp = _IInvokeOp
+    rocketlib_types_stub.IInvokeTool = IInvokeTool
+    rocketlib_types_stub.IInvokeMemory = IInvokeMemory
+    rocketlib_types_stub.IInvokeGuard = IInvokeGuard
+
+    return rocketlib_stub, rocketlib_types_stub, IInvokeTool, IInvokeGuard
+
+
+@pytest.fixture
+def host_module(monkeypatch):
+    """Load host.py directly from disk with rocketlib stubbed out.
+
+    Loaded by file path (not `import ai.common.agent._internal.host`) so
+    this doesn't have to drag in the rest of the `ai` package's real
+    dependencies (`depends`, model-server extras, etc.) — host.py itself
+    only imports stdlib plus `rocketlib`/`rocketlib.types`.
+    """
+    rocketlib_stub, rocketlib_types_stub, _IInvokeTool, _IInvokeGuard = _make_rocketlib_stubs()
+
+    monkeypatch.setitem(sys.modules, 'rocketlib', rocketlib_stub)
+    monkeypatch.setitem(sys.modules, 'rocketlib.types', rocketlib_types_stub)
+
+    spec = importlib.util.spec_from_file_location('_test_host_guard_module', _HOST_PATH)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+
+    yield module
+
+
+class _FakeInstance:
+    """Stand-in for the engine `IInstance` (`pSelf`) that Tools talks to."""
+
+    def __init__(self, *, tool_nodes, guard_nodes, tool_descriptor, tool_output, guard_check):
+        self._tool_nodes = tool_nodes
+        self._guard_nodes = guard_nodes
+        self._tool_descriptor = tool_descriptor
+        self._tool_output = tool_output
+        self._guard_check = guard_check
+        self.tool_invoked = False
+
+    def getControllerNodeIds(self, class_type):
+        if class_type == 'tool':
+            return list(self._tool_nodes)
+        if class_type == 'guard':
+            return list(self._guard_nodes)
+        return []
+
+    def invoke(self, param, component_id=''):
+        type_name = type(param).__qualname__
+        if type_name.endswith('Query'):
+            param.tools.append(self._tool_descriptor)
+            return None
+        if type_name.endswith('Invoke') and hasattr(param, 'tool_name') and hasattr(param, 'input'):
+            self.tool_invoked = True
+            param.output = self._tool_output
+            return param
+        if type_name.endswith('Check'):
+            param.result = self._guard_check(param.mode, param.text)
+            return param
+        raise AssertionError(f'unexpected invoke param: {param!r}')
+
+
+def _build_tools(host_module, *, guard_nodes, guard_check, tool_output='ok'):
+    instance = _FakeInstance(
+        tool_nodes=['tool_slack_1'],
+        guard_nodes=guard_nodes,
+        tool_descriptor={'name': 'send_message', 'description': 'Send a message'},
+        tool_output=tool_output,
+        guard_check=guard_check,
+    )
+    invoker = types.SimpleNamespace(instance=instance)
+    tools = host_module.AgentHostServices.Tools(invoker)
+    tool_name = next(iter(tools._tool_list))
+    return tools, instance, tool_name
+
+
+def _pass_result():
+    return {'action': 'pass', 'violations': []}
+
+
+def _block_result(rule='pii_leak'):
+    return {'action': 'block', 'violations': [{'rule': rule, 'details': 'blocked for test'}]}
+
+
+class TestNoGuardAttached:
+    def test_invoke_runs_normally_without_guard_nodes(self, host_module):
+        tools, instance, tool_name = _build_tools(
+            host_module, guard_nodes=[], guard_check=lambda mode, text: pytest.fail('guard should not run')
+        )
+
+        output = tools.invoke(tool_name, {'text': 'hello'})
+
+        assert output == 'ok'
+        assert instance.tool_invoked is True
+
+
+class TestGuardBlocksArgs:
+    def test_block_on_args_prevents_tool_call(self, host_module):
+        calls = []
+
+        def guard_check(mode, text):
+            calls.append(mode)
+            return _block_result() if mode == 'output' else _pass_result()
+
+        tools, instance, tool_name = _build_tools(host_module, guard_nodes=['guardrails_1'], guard_check=guard_check)
+
+        with pytest.raises(ValueError, match='Guardrails blocked'):
+            tools.invoke(tool_name, {'text': 'email me at john.doe@example.com'})
+
+        assert instance.tool_invoked is False, 'tool must never run once the pre-check blocks'
+        assert calls == ['output'], 'only the pre-check should run before a block'
+
+
+class TestGuardBlocksResult:
+    def test_block_on_result_still_raises_after_tool_ran(self, host_module):
+        calls = []
+
+        def guard_check(mode, text):
+            calls.append(mode)
+            return _block_result() if mode == 'input' else _pass_result()
+
+        tools, instance, tool_name = _build_tools(host_module, guard_nodes=['guardrails_1'], guard_check=guard_check)
+
+        with pytest.raises(ValueError, match='Guardrails blocked'):
+            tools.invoke(tool_name, {'text': 'safe args'})
+
+        # The tool already ran (its side effect can't be undone), but the
+        # caller still sees a failure instead of the (unsafe) output.
+        assert instance.tool_invoked is True
+        assert calls == ['output', 'input']
+
+
+class TestGuardPassesBothChecks:
+    def test_clean_call_runs_both_checks_and_returns_output(self, host_module):
+        calls = []
+
+        def guard_check(mode, text):
+            calls.append(mode)
+            return _pass_result()
+
+        tools, instance, tool_name = _build_tools(
+            host_module, guard_nodes=['guardrails_1'], guard_check=guard_check, tool_output='sent'
+        )
+
+        output = tools.invoke(tool_name, {'text': 'hello team'})
+
+        assert output == 'sent'
+        assert instance.tool_invoked is True
+        assert calls == ['output', 'input']
