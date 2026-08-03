@@ -4,12 +4,13 @@
 # =============================================================================
 
 """
-Unit tests for guard-node enforcement in ``AgentHostServices.Tools`` (host.py).
+Unit tests for guard-node enforcement in ``AgentHostServices`` (host.py).
 
 Covers the control-plane guard attachment from issue #1792: a ``guard`` node
 attached via ``control`` to an agent should gate every tool call the agent
-makes (args pre-check, result post-check), without needing a lane connection
-between the tool and the guard.
+makes (args pre-check, result post-check) and every persistent-memory
+read/write (``Memory.put``/``get``/``list``), without needing a lane
+connection between the guarded channel and the guard.
 
 The real ``rocketlib``/``rocketlib.types`` require the compiled C++ engine
 (``engLib``), which isn't available in a plain test environment. This stubs
@@ -311,3 +312,158 @@ class TestGuardFailsClosedOnMalformedResult:
             tools.invoke(tool_name, {'text': 'hello team'})
 
         assert instance.tool_invoked is False
+
+
+# ---------------------------------------------------------------------------
+# Memory guard coverage
+# ---------------------------------------------------------------------------
+
+
+class _FakeMemoryInstance:
+    """Stand-in for the engine `IInstance` that `Memory` talks to."""
+
+    def __init__(self, *, guard_nodes, store, guard_check):
+        self._guard_nodes = guard_nodes
+        self._store = store
+        self._guard_check = guard_check
+        self.memory_invoked = []
+
+    def getControllerNodeIds(self, class_type):
+        if class_type == 'guard':
+            return list(self._guard_nodes)
+        return []
+
+    def invoke(self, param, component_id=''):
+        type_name = type(param).__qualname__
+        if type_name.endswith('Check'):
+            param.result = self._guard_check(param.mode, param.text)
+            return param
+        if type_name.endswith('Put'):
+            self.memory_invoked.append('put')
+            self._store[param.input['key']] = param.input['value']
+            param.output = {'ok': True}
+            return param
+        if type_name.endswith('Get'):
+            self.memory_invoked.append('get')
+            param.output = {'value': self._store.get(param.input['key'])}
+            return param
+        if type_name.endswith('List'):
+            self.memory_invoked.append('list')
+            param.output = {'keys': list(self._store.keys())}
+            return param
+        if type_name.endswith('Clear'):
+            self.memory_invoked.append('clear')
+            param.output = {'ok': True}
+            return param
+        raise AssertionError(f'unexpected invoke param: {param!r}')
+
+
+def _build_memory(host_module, *, guard_nodes, guard_check, store=None):
+    instance = _FakeMemoryInstance(
+        guard_nodes=guard_nodes, store=store if store is not None else {}, guard_check=guard_check
+    )
+    invoker = types.SimpleNamespace(instance=instance)
+    memory = host_module.AgentHostServices.Memory(invoker, 'memory_1')
+    return memory, instance
+
+
+class TestMemoryNoGuardAttached:
+    def test_put_runs_normally_without_guard_nodes(self, host_module):
+        memory, instance = _build_memory(
+            host_module, guard_nodes=[], guard_check=lambda mode, text: pytest.fail('guard should not run')
+        )
+
+        memory.put('k', 'value')
+
+        assert instance.memory_invoked == ['put']
+        assert instance._store['k'] == 'value'
+
+
+class TestMemoryGuardPut:
+    def test_block_prevents_write(self, host_module):
+        calls = []
+
+        def guard_check(mode, text):
+            calls.append(mode)
+            return _block_result()
+
+        memory, instance = _build_memory(host_module, guard_nodes=['guardrails_1'], guard_check=guard_check)
+
+        with pytest.raises(ValueError, match='Guardrails blocked'):
+            memory.put('secret', 'email me at john.doe@example.com')
+
+        assert instance.memory_invoked == [], 'the write must never happen once the pre-check blocks'
+        assert calls == ['output']
+
+    def test_clean_value_writes_through(self, host_module):
+        memory, instance = _build_memory(
+            host_module, guard_nodes=['guardrails_1'], guard_check=lambda mode, text: _pass_result()
+        )
+
+        memory.put('k', 'safe value')
+
+        assert instance.memory_invoked == ['put']
+        assert instance._store['k'] == 'safe value'
+
+
+class TestMemoryGuardGet:
+    def test_block_on_stored_value_after_read(self, host_module):
+        calls = []
+
+        def guard_check(mode, text):
+            calls.append(mode)
+            return _block_result()
+
+        memory, instance = _build_memory(
+            host_module, guard_nodes=['guardrails_1'], guard_check=guard_check, store={'k': 'poisoned content'}
+        )
+
+        with pytest.raises(ValueError, match='Guardrails blocked'):
+            memory.get('k')
+
+        # The read already happened (can't un-read from the store), but the
+        # caller still sees a failure instead of the poisoned value.
+        assert instance.memory_invoked == ['get']
+        assert calls == ['input']
+
+    def test_clean_value_returned(self, host_module):
+        memory, instance = _build_memory(
+            host_module,
+            guard_nodes=['guardrails_1'],
+            guard_check=lambda mode, text: _pass_result(),
+            store={'k': 'safe value'},
+        )
+
+        output = memory.get('k')
+
+        assert output == {'value': 'safe value'}
+
+
+class TestMemoryGuardList:
+    def test_block_on_list_result(self, host_module):
+        memory, instance = _build_memory(
+            host_module,
+            guard_nodes=['guardrails_1'],
+            guard_check=lambda mode, text: _block_result(),
+            store={'a': '1'},
+        )
+
+        with pytest.raises(ValueError, match='Guardrails blocked'):
+            memory.list()
+
+        assert instance.memory_invoked == ['list']
+
+
+class TestMemoryClearIsUnguarded:
+    """clear() carries no content to check -- deletion, not a content flow."""
+
+    def test_clear_runs_without_a_guard_check(self, host_module):
+        memory, instance = _build_memory(
+            host_module,
+            guard_nodes=['guardrails_1'],
+            guard_check=lambda mode, text: pytest.fail('guard should not run for clear()'),
+        )
+
+        memory.clear('k')
+
+        assert instance.memory_invoked == ['clear']

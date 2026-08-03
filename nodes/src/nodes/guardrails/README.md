@@ -111,7 +111,9 @@ One guard node covers every tool the agent holds — no per-tool wiring needed. 
 - Before the tool executes, on the call's **args** (`mode='output'`) — this is agent-generated content on its way out, so it gets the same content-safety/PII/hallucination checks an answer would.
 - After the tool executes, on its **result** (`mode='input'`) — this is untrusted data coming back in, so it gets the same prompt-injection check a question would (the standard indirect-prompt-injection-into-tool-use defense).
 
-`policy_mode: block` raises before the tool runs (args check) or before its result reaches the agent (result check); the framework driver surfaces this as a tool error, not a pipeline crash. `warn` and `log` behave the same as on the `questions`/`answers` lanes.
+`policy_mode: block` raises before the tool runs (args check) or before its result reaches the agent (result check); the framework driver surfaces this as a tool error, not a pipeline crash. `warn` and `log` behave the same as on the `questions`/`answers` lanes. A guard node that responds with anything other than a recognized `pass`/`warn`/`log`/`block` action is treated as a block — a broken or misconfigured guard fails closed rather than silently letting every call through unchecked.
+
+The same guard also covers persistent memory: `Memory.put` is checked before the write (`mode='output'`), and `Memory.get`/`list` are checked on the value read back (`mode='input'`) — the same indirect-prompt-injection concern applies to content another run stored earlier. `Memory.clear` carries no content to evaluate and is left unguarded.
 
 Note: this only covers agent nodes that are themselves lane-connected (e.g. `agent_rocketride`). A sub-agent invoked purely via `control` (e.g. `agent_crewai_subagent`) is not yet coverable this way — tracked separately.
 
