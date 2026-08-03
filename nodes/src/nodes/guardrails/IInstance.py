@@ -175,9 +175,11 @@ class IInstance(IInstanceBase):
 
         result = engine.evaluate(param.text, mode=param.mode)
 
-        for violation in result.get('violations', []):
+        # 'log' mode records violations silently, same as writeQuestions/writeAnswers.
+        if result['action'] in ('block', 'warn'):
             level = 'blocked' if result['action'] == 'block' else 'warning'
-            warning(f'Guardrails control-plane {param.mode} {level}: {violation["rule"]} — {violation["details"]}')
+            for violation in result.get('violations', []):
+                warning(f'Guardrails control-plane {param.mode} {level}: {violation["rule"]} — {violation["details"]}')
 
         param.result = result
         return param

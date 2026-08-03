@@ -886,6 +886,30 @@ class TestControlPlaneCheck:
 
         assert param.result == {'action': 'pass', 'violations': []}
 
+    def test_log_mode_does_not_emit_warnings(self):
+        """`log` mode must stay silent, same as writeQuestions/writeAnswers."""
+        inst = self._load({'policy_mode': 'log', 'enable_pii_detection': True})
+        calls = []
+        inst.check.__func__.__globals__['warning'] = lambda *a, **kw: calls.append(a)
+        param = types.SimpleNamespace(mode='output', text='Email me at john.doe@example.com', result=None)
+
+        inst.check(param)
+
+        assert param.result['action'] == 'log'
+        assert calls == [], 'log mode must not call warning()'
+
+    def test_warn_mode_emits_warnings(self):
+        """`warn` mode still logs, for contrast with the log-mode-silent case above."""
+        inst = self._load({'policy_mode': 'warn', 'enable_pii_detection': True})
+        calls = []
+        inst.check.__func__.__globals__['warning'] = lambda *a, **kw: calls.append(a)
+        param = types.SimpleNamespace(mode='output', text='Email me at john.doe@example.com', result=None)
+
+        inst.check(param)
+
+        assert param.result['action'] == 'warn'
+        assert len(calls) == 1
+
 
 # ============================================================================
 # Serialization safety

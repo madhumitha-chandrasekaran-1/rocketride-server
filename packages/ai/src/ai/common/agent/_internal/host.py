@@ -162,7 +162,10 @@ class AgentHostServices:
 
             Raises:
                 ValueError: If any attached guard's `policy_mode` blocks
-                    this text. The exception surfaces to the calling
+                    this text, or if a guard node responds without a
+                    recognized `action` — a malformed or misconfigured
+                    guard fails closed rather than silently disabling
+                    the check. The exception surfaces to the calling
                     framework driver as a tool error, so the tool never
                     runs (pre-check) or its result never reaches the
                     agent (post-check).
@@ -178,9 +181,15 @@ class AgentHostServices:
                 param = IInvokeGuard.Check(mode=mode, text=text)
                 self._invoker.instance.invoke(param, component_id=guard_node)
                 result = getattr(param, 'result', None) or {}
-                if result.get('action') == 'block':
+                action = result.get('action')
+                if action == 'block':
                     violations = ', '.join(v.get('rule', '?') for v in result.get('violations', []))
                     raise ValueError(f'Guardrails blocked tool {tool_name!r} ({mode}): {violations}')
+                if action not in ('pass', 'warn', 'log'):
+                    raise ValueError(
+                        f'Guardrails blocked tool {tool_name!r} ({mode}): '
+                        f'guard {guard_node!r} returned no recognized action ({action!r})'
+                    )
 
         def validate(self, tool_name: str, input: Any) -> None:
             """

@@ -170,6 +170,10 @@ def _block_result(rule='pii_leak'):
     return {'action': 'block', 'violations': [{'rule': rule, 'details': 'blocked for test'}]}
 
 
+def _warn_result(rule='pii_leak'):
+    return {'action': 'warn', 'violations': [{'rule': rule, 'details': 'warned for test'}]}
+
+
 class TestNoGuardAttached:
     def test_invoke_runs_normally_without_guard_nodes(self, host_module):
         tools, instance, tool_name = _build_tools(
@@ -235,3 +239,39 @@ class TestGuardPassesBothChecks:
         assert output == 'sent'
         assert instance.tool_invoked is True
         assert calls == ['output', 'input']
+
+    def test_warn_action_does_not_block(self, host_module):
+        tools, instance, tool_name = _build_tools(
+            host_module, guard_nodes=['guardrails_1'], guard_check=lambda mode, text: _warn_result(), tool_output='sent'
+        )
+
+        output = tools.invoke(tool_name, {'text': 'hello team'})
+
+        assert output == 'sent'
+        assert instance.tool_invoked is True
+
+
+class TestGuardFailsClosedOnMalformedResult:
+    """A guard node that doesn't set a recognized `action` must fail closed, not silently disable enforcement."""
+
+    def test_missing_action_blocks(self, host_module):
+        tools, instance, tool_name = _build_tools(
+            host_module, guard_nodes=['guardrails_1'], guard_check=lambda mode, text: {}
+        )
+
+        with pytest.raises(ValueError, match='no recognized action'):
+            tools.invoke(tool_name, {'text': 'hello team'})
+
+        assert instance.tool_invoked is False
+
+    def test_unrecognized_action_blocks(self, host_module):
+        tools, instance, tool_name = _build_tools(
+            host_module,
+            guard_nodes=['guardrails_1'],
+            guard_check=lambda mode, text: {'action': 'allow', 'violations': []},
+        )
+
+        with pytest.raises(ValueError, match='no recognized action'):
+            tools.invoke(tool_name, {'text': 'hello team'})
+
+        assert instance.tool_invoked is False
