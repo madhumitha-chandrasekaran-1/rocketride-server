@@ -94,19 +94,49 @@ def _make_rocketlib_stubs():
     return rocketlib_stub, rocketlib_types_stub, IInvokeTool, IInvokeGuard
 
 
+def _safe_str(value):
+    """Mirror ai.common.utils.string_utils.safe_str exactly."""
+    if value is None:
+        return ''
+    try:
+        return str(value)
+    except Exception:
+        return ''
+
+
+def _make_ai_utils_stub():
+    """Build a minimal `ai`/`ai.common`/`ai.common.utils` stand-in exposing `safe_str`.
+
+    Importing the real package pulls in `ai/__init__.py`'s `from depends import
+    depends`, which needs the compiled engine's dependency-loader -- not
+    available in a plain test environment. `safe_str` itself has no such
+    dependency, so this stub reimplements it verbatim rather than pulling in
+    the whole package.
+    """
+    ai_stub = types.ModuleType('ai')
+    ai_common_stub = types.ModuleType('ai.common')
+    ai_common_utils_stub = types.ModuleType('ai.common.utils')
+    ai_common_utils_stub.safe_str = _safe_str
+    return ai_stub, ai_common_stub, ai_common_utils_stub
+
+
 @pytest.fixture
 def host_module(monkeypatch):
-    """Load host.py directly from disk with rocketlib stubbed out.
+    """Load host.py directly from disk with rocketlib/ai.common.utils stubbed out.
 
     Loaded by file path (not `import ai.common.agent._internal.host`) so
     this doesn't have to drag in the rest of the `ai` package's real
     dependencies (`depends`, model-server extras, etc.) — host.py itself
-    only imports stdlib plus `rocketlib`/`rocketlib.types`.
+    only imports stdlib plus `rocketlib`/`rocketlib.types`/`ai.common.utils.safe_str`.
     """
     rocketlib_stub, rocketlib_types_stub, _IInvokeTool, _IInvokeGuard = _make_rocketlib_stubs()
+    ai_stub, ai_common_stub, ai_common_utils_stub = _make_ai_utils_stub()
 
     monkeypatch.setitem(sys.modules, 'rocketlib', rocketlib_stub)
     monkeypatch.setitem(sys.modules, 'rocketlib.types', rocketlib_types_stub)
+    monkeypatch.setitem(sys.modules, 'ai', ai_stub)
+    monkeypatch.setitem(sys.modules, 'ai.common', ai_common_stub)
+    monkeypatch.setitem(sys.modules, 'ai.common.utils', ai_common_utils_stub)
 
     spec = importlib.util.spec_from_file_location('_test_host_guard_module', _HOST_PATH)
     module = importlib.util.module_from_spec(spec)
@@ -158,7 +188,7 @@ def _build_tools(host_module, *, guard_nodes, guard_check, tool_output='ok'):
         guard_check=guard_check,
     )
     invoker = types.SimpleNamespace(instance=instance)
-    tools = host_module.AgentHostServices.Tools(invoker)
+    tools = host_module.AgentHostServices.Tools(invoker, guard_nodes)
     tool_name = next(iter(tools._tool_list))
     return tools, instance, tool_name
 
@@ -363,7 +393,7 @@ def _build_memory(host_module, *, guard_nodes, guard_check, store=None):
         guard_nodes=guard_nodes, store=store if store is not None else {}, guard_check=guard_check
     )
     invoker = types.SimpleNamespace(instance=instance)
-    memory = host_module.AgentHostServices.Memory(invoker, 'memory_1')
+    memory = host_module.AgentHostServices.Memory(invoker, 'memory_1', guard_nodes)
     return memory, instance
 
 

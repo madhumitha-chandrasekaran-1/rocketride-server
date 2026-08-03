@@ -13,22 +13,12 @@ plan in plans/elegant-cooking-finch.md for the architectural rationale.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from ai.common.utils import safe_str
 from rocketlib import ToolDescriptor
 from rocketlib.types import IInvokeOp, IInvokeTool, IInvokeMemory, IInvokeGuard
-
-
-def _guard_text(value: Any) -> str:
-    """Flatten a tool/memory call's args or output to text for a guard check."""
-    if isinstance(value, str):
-        return value
-    try:
-        return json.dumps(value, default=str)
-    except Exception:
-        return str(value)
 
 
 def _check_guard(invoker, guard_nodes: List[str], mode: str, value: Any, *, label: str) -> None:
@@ -58,7 +48,7 @@ def _check_guard(invoker, guard_nodes: List[str], mode: str, value: Any, *, labe
     if not guard_nodes:
         return
 
-    text = _guard_text(value)
+    text = safe_str(value)
     if not text.strip():
         return
 
@@ -122,17 +112,23 @@ class AgentHostServices:
         # instance in the process and silently leak tool descriptors between
         # concurrent agent runs.
 
-        def __init__(self, invoker):
+        def __init__(self, invoker, guard_nodes: List[str]):
             """Create a Tools host service wrapper bound to an engine invoker.
 
             Discovers all tools on every connected tool node once at
             construction.  Drivers read the prepared catalog as
             ``self.list`` (a flat ``List[ToolDescriptor]``).
+
+            Args:
+                guard_nodes: Guard node ids attached to this agent, resolved
+                    once by the caller (``AgentHostServices.__init__``) and
+                    shared with ``Memory`` rather than each channel doing
+                    its own ``getControllerNodeIds('guard')`` lookup.
             """
             self._invoker = invoker
             self._tool_list: Dict[str, Any] = {}
             self._tool_nodes: List[str] = self._invoker.instance.getControllerNodeIds('tool')
-            self._guard_nodes: List[str] = self._invoker.instance.getControllerNodeIds('guard')
+            self._guard_nodes = guard_nodes
 
             # For every tool node
             for tool_node in self._tool_nodes:
@@ -264,11 +260,17 @@ class AgentHostServices:
     class Memory:
         """Memory host interface backed by IInvokeMemory operations."""
 
-        def __init__(self, invoker, node_id: str) -> None:
-            """Create a Memory host service wrapper bound to an engine invoker."""
+        def __init__(self, invoker, node_id: str, guard_nodes: List[str]) -> None:
+            """Create a Memory host service wrapper bound to an engine invoker.
+
+            Args:
+                guard_nodes: Guard node ids attached to this agent, resolved
+                    once by the caller (``AgentHostServices.__init__``) and
+                    shared with ``Tools`` rather than a separate lookup here.
+            """
             self._invoker = invoker
             self._node_id = node_id
-            self._guard_nodes: List[str] = invoker.instance.getControllerNodeIds('guard')
+            self._guard_nodes = guard_nodes
 
         def put(self, key: str, value: Any) -> Dict[str, Any]:
             # Guard the write: block before it lands in persistent memory if
@@ -309,9 +311,16 @@ class AgentHostServices:
     def __init__(self, invoker):
         """Create host service wrappers bound to an engine invoker."""
         self.llm = AgentHostServices.LLM(invoker)
-        self.tools = AgentHostServices.Tools(invoker)
+
+        # Resolved once and shared: both Tools and Memory guard their calls
+        # against the same set of guard nodes attached to this agent.
+        guard_nodes = invoker.instance.getControllerNodeIds('guard')
+        self.tools = AgentHostServices.Tools(invoker, guard_nodes)
+
         nodes = invoker.instance.getControllerNodeIds('memory')
-        self.memory: Optional[AgentHostServices.Memory] = AgentHostServices.Memory(invoker, nodes[0]) if nodes else None
+        self.memory: Optional[AgentHostServices.Memory] = (
+            AgentHostServices.Memory(invoker, nodes[0], guard_nodes) if nodes else None
+        )
 
 
 # ============================================================================
