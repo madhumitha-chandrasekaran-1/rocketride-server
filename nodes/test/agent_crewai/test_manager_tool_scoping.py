@@ -169,7 +169,11 @@ class TestManagerSourceClearsTaskTools:
         start = _MANAGER_SRC.index('manager_agent = Agent(')
         block = _MANAGER_SRC[start : _MANAGER_SRC.index(')', _MANAGER_SRC.index('max_iter', start))]
         assert 'tools=manager_tools' in block
-        assert 'context.tools.list' in _MANAGER_SRC
+        # Bound to the exact assignment (not a bare 'context.tools.list' substring
+        # search, which would also match sub_context.tools.list -- the delegates'
+        # own channel a few lines up) so the test fails if manager_tools is ever
+        # rebound to the wrong source.
+        assert 'manager_tools = self._build_crew_tools(context, context.tools.list)' in _MANAGER_SRC
 
 
 @pytest.mark.parametrize('needle', ['crewai/task.py', 'crews/utils.py', 'agent_tools'])
