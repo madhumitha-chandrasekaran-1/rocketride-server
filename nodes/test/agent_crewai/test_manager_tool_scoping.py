@@ -158,11 +158,18 @@ class TestManagerSourceClearsTaskTools:
         assert 'check_tools' in _MANAGER_SRC
         assert '_get_agent_to_use' in _MANAGER_SRC
 
-    def test_manager_agent_is_still_built_without_tools(self):
-        """Belt and braces -- the manager must not be handed a toolset directly either."""
+    def test_manager_agent_carries_only_its_own_channel_tools(self):
+        """The manager MAY hold tools now, but only from its own `tool` channel.
+
+        `context.tools` here is the manager node's own control-plane channel
+        (wired via the `tool` invoke port), never a delegate's. Delegate tools
+        still only reach a Task through `check_tools`, which `task_obj.tools = []`
+        (asserted by `test_task_tools_are_cleared` above) continues to block.
+        """
         start = _MANAGER_SRC.index('manager_agent = Agent(')
         block = _MANAGER_SRC[start : _MANAGER_SRC.index(')', _MANAGER_SRC.index('max_iter', start))]
-        assert 'tools=' not in block
+        assert 'tools=manager_tools' in block
+        assert 'context.tools.list' in _MANAGER_SRC
 
 
 @pytest.mark.parametrize('needle', ['crewai/task.py', 'crews/utils.py', 'agent_tools'])
