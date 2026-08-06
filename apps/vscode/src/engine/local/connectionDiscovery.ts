@@ -60,14 +60,12 @@ import * as path from 'path';
 
 /** Shape of the connection discovery file's contents. */
 export interface ConnectionDiscoveryInfo {
-	/** HTTP base URL of the running local engine, e.g. `http://localhost:54321`. */
 	uri: string;
-	/** API key for this connection. Local mode always uses the fixed default. */
+	/** Local mode always uses the fixed default; see `writeConnectionDiscovery`. */
 	apiKey: string;
-	/** PID of the engine process that wrote this file, so a stale entry left
-	 * behind by a crash (no clean `stop()`) can be told apart from a live one. */
+	/** PID of the writer, so a stale entry left behind by a crash (no clean
+	 * `stop()`) can be told apart from a live one. */
 	pid: number;
-	/** ISO-8601 timestamp of when this file was last written. */
 	updatedAt: string;
 }
 
