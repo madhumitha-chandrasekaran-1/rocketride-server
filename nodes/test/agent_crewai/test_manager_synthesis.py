@@ -202,20 +202,31 @@ class TestImportManagerModuleCleanup:
     """
 
     def test_evicts_agent_crewai_modules_even_when_import_raises(self):
-        # Compare against a before-snapshot, not "no agent_crewai* names at
-        # all": sibling test files (test_llm_contract.py, test_tool_schema.py)
-        # import agent_crewai.crewai_base under their own stubs and -- by
-        # their own design -- don't evict it afterward, so it may already be
-        # cached (stub-tainted, but not this test's problem) depending on
-        # collection order. What this test owns is that THIS call doesn't add
-        # any new leaks beyond whatever was already there.
-        before = {name for name in sys.modules if name == 'agent_crewai' or name.startswith('agent_crewai.')}
+        # Force a clean slate first. Sibling test files (test_llm_contract.py,
+        # test_tool_schema.py) import agent_crewai.crewai_base under their own
+        # stubs and -- by their own design -- don't evict it afterward, so
+        # depending on collection order agent_crewai/agent_crewai.crewai_manager
+        # could already be cached when this test runs. If they were, the
+        # failing import below would find them present and add nothing new,
+        # so even a finally-less (unfixed) _import_manager_module would show
+        # "no new leaks" -- passing vacuously without eviction ever running.
+        # Popping any existing agent_crewai* entries first guarantees the
+        # failing import has to freshly (re)create agent_crewai and
+        # agent_crewai.crewai_manager, so this test actually exercises
+        # eviction rather than coincidentally finding nothing to evict.
+        saved = {
+            name: sys.modules.pop(name)
+            for name in list(sys.modules)
+            if name == 'agent_crewai' or name.startswith('agent_crewai.')
+        }
+        try:
+            with pytest.raises(ModuleNotFoundError):
+                _import_manager_module('agent_crewai.crewai_manager.nonexistent_module_for_test')
 
-        with pytest.raises(ModuleNotFoundError):
-            _import_manager_module('agent_crewai.crewai_manager.nonexistent_module_for_test')
-
-        after = {name for name in sys.modules if name == 'agent_crewai' or name.startswith('agent_crewai.')}
-        assert after == before
+            leaked = [name for name in sys.modules if name == 'agent_crewai' or name.startswith('agent_crewai.')]
+            assert leaked == [], 'the failing import must not leave any agent_crewai* modules cached'
+        finally:
+            sys.modules.update(saved)
 
 
 def _make_manager(call_llm_return: str = '') -> Any:
