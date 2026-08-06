@@ -137,8 +137,14 @@ class ExecutionMixin(DAPClient):
             ttl: Time-to-live in seconds for idle pipelines (optional, server default
                 if not provided; use 0 for no timeout)
             pipelineTraceLevel: Pipeline trace level ('none', 'metadata', 'summary',
-                'full'). When set, captures every lane write and invoke call in the
-                response under '_trace'.
+                'full'). Does NOT add a '_trace' field to this method's response --
+                no such field exists. When set, every lane write and invoke call is
+                captured server-side and rolled up into run analytics on the task's
+                status object instead (``componentStats``, ``slowestDocs``,
+                ``completionSeconds``, ``idleSeconds``, ``idleLongestSeconds``,
+                ``idleLongestAt`` -- see :class:`~rocketride.types.task.TASK_STATUS`),
+                retrieved separately via :meth:`get_task_status`, not from this
+                method's return value.
 
         Returns:
             Dict containing:

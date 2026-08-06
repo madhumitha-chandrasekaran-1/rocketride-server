@@ -64,7 +64,7 @@ const result = await client.use({
 | `use_existing` / `useExisting` | `bool` / `boolean` | No | Reuse an existing pipeline with the same token |
 | `args` | `list[str]` / `string[]` | No | Command-line style arguments to pass to the pipeline |
 | `ttl` | `int` / `number` | No | Time-to-live in seconds for idle pipelines (0 = no timeout) |
-| `pipelineTraceLevel` | `str` / `string` | No | Trace level: `'none'`, `'metadata'`, `'summary'`, or `'full'` |
+| `pipelineTraceLevel` | `str` / `string` | No | Trace level: `'none'`, `'metadata'`, `'summary'`, or `'full'`. Does not add a `_trace` field to this call's response -- when set, trace data is rolled up into run analytics on the task's status object (`componentStats`, `slowestDocs`, `completionSeconds`, `idleSeconds`, `idleLongestSeconds`, `idleLongestAt`), retrieved separately via `get_task_status` / `getTaskStatus`. |
 
 ## **Returns**
 

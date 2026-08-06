@@ -1429,7 +1429,7 @@ export class RocketRideClient extends DAPClient {
 	 * @param options.useExisting - Use existing pipeline instance
 	 * @param options.args - Command line arguments to pass to pipeline
 	 * @param options.ttl - Time-to-live in seconds for idle pipelines (optional, server default if not provided; use 0 for no timeout)
-	 * @param options.pipelineTraceLevel - Trace level: 'none' | 'metadata' | 'summary' | 'full'. When set, captures every lane write and invoke call in the response under '_trace'.
+	 * @param options.pipelineTraceLevel - Trace level: 'none' | 'metadata' | 'summary' | 'full'. Does NOT add a '_trace' field to this call's response (no such field exists). When set, every lane write and invoke call is captured server-side and rolled up into run analytics on the task's status object instead -- `componentStats`, `slowestDocs`, `completionSeconds`, `idleSeconds`, `idleLongestSeconds`, `idleLongestAt` (see {@link TASK_STATUS}) -- retrieved separately via {@link RocketRideClient.getTaskStatus}, not from this method's return value.
 	 *
 	 * @returns Promise resolving to an object containing the task token and other metadata
 	 * @throws Error if neither pipeline nor filepath is provided
@@ -1458,7 +1458,7 @@ export class RocketRideClient extends DAPClient {
 			useExisting?: boolean;
 			args?: string[];
 			ttl?: number;
-			/** Pipeline trace level. When set, captures every lane write and invoke call in the response under '_trace'. */
+			/** Pipeline trace level. Does NOT add a '_trace' field to this response -- see the `pipelineTraceLevel` param doc above for where trace data actually surfaces. */
 			pipelineTraceLevel?: 'none' | 'metadata' | 'summary' | 'full';
 			/** Optional display name for the task (e.g. shown in dashboard). */
 			name?: string;
