@@ -146,7 +146,7 @@ def _scoped_stubs() -> Iterator[None]:
                 sys.modules[name] = module
 
 
-def _import_manager_module() -> Any:
+def _import_manager_module(module_name: str = 'agent_crewai.crewai_manager.manager') -> Any:
     """Import crewai_manager.manager under the stubs, then evict every
     agent_crewai* module the import pulled in from sys.modules.
 
@@ -158,13 +158,26 @@ def _import_manager_module() -> Any:
     stub-tainted copy instead of a fresh one. Evicting them here doesn't
     invalidate the `manager_module`/`CrewManager` references already bound
     below; sys.modules only governs future imports, not held references.
+
+    The eviction runs in `finally` rather than after the import: Python's
+    import machinery caches each parent package in `sys.modules` as soon as
+    it succeeds, before moving on to the next component of a dotted import.
+    So a failure partway through (e.g. `manager` itself raising after
+    `agent_crewai` and `agent_crewai.crewai_manager` already imported fine)
+    would leave those already-succeeded parents stub-tainted and uncleaned
+    if eviction only ran on the success path. `module_name` is a parameter
+    (default the real target) so tests can force that exact partial-success-
+    then-failure shape with a nonexistent submodule name, without needing to
+    break the stubs themselves.
     """
     before = set(sys.modules)
-    with _scoped_stubs():
-        module = importlib.import_module('agent_crewai.crewai_manager.manager')
-    for name in list(sys.modules):
-        if name not in before and (name == 'agent_crewai' or name.startswith('agent_crewai.')):
-            del sys.modules[name]
+    try:
+        with _scoped_stubs():
+            module = importlib.import_module(module_name)
+    finally:
+        for name in list(sys.modules):
+            if name not in before and (name == 'agent_crewai' or name.startswith('agent_crewai.')):
+                del sys.modules[name]
     return module
 
 
@@ -176,6 +189,33 @@ CrewManager = manager_module.CrewManager
 def _stubbed_crewai():
     with _scoped_stubs():
         yield
+
+
+class TestImportManagerModuleCleanup:
+    """_import_manager_module's cleanup must run even when the import itself
+    raises -- otherwise whatever agent_crewai* packages DID finish importing
+    before the failure (agent_crewai, agent_crewai.crewai_manager -- neither
+    needs the missing submodule below) would stay cached under their real
+    names, stub-tainted, for a later import elsewhere in the same session to
+    pick up. A nonexistent submodule name forces exactly that partial-
+    success-then-failure shape reliably, without needing to break the stubs.
+    """
+
+    def test_evicts_agent_crewai_modules_even_when_import_raises(self):
+        # Compare against a before-snapshot, not "no agent_crewai* names at
+        # all": sibling test files (test_llm_contract.py, test_tool_schema.py)
+        # import agent_crewai.crewai_base under their own stubs and -- by
+        # their own design -- don't evict it afterward, so it may already be
+        # cached (stub-tainted, but not this test's problem) depending on
+        # collection order. What this test owns is that THIS call doesn't add
+        # any new leaks beyond whatever was already there.
+        before = {name for name in sys.modules if name == 'agent_crewai' or name.startswith('agent_crewai.')}
+
+        with pytest.raises(ModuleNotFoundError):
+            _import_manager_module('agent_crewai.crewai_manager.nonexistent_module_for_test')
+
+        after = {name for name in sys.modules if name == 'agent_crewai' or name.startswith('agent_crewai.')}
+        assert after == before
 
 
 def _make_manager(call_llm_return: str = '') -> Any:
