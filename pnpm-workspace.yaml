@@ -6,6 +6,100 @@
 # The cycle is via a peer dependency and is harmless.
 ignoreWorkspaceCycles: true
 
+# Moved from package.json's "pnpm" key: pnpm 10+ no longer reads
+# overrides/patchedDependencies/peerDependencyRules/supportedArchitectures
+# from package.json (silently ignored, with a warning on every command) --
+# they have to live here instead. See https://pnpm.io/settings.
+#
+# These overrides are semver-floor security pins (each keeps a known-vulnerable
+# transitive dependency's major version, bumped to a patched minimum), applied
+# across the dependency tree regardless of what any individual package.json
+# declares. Because package.json's copy was silently ignored, none of these
+# floors have actually been enforced since this file was last touched --
+# transitive resolution has been whatever the unpinned dependency tree
+# produces the whole time.
+overrides:
+  '@babel/core': '>=7.29.6 <8'
+  '@grpc/grpc-js': '>=1.14.4 <2'
+  '@remix-run/router': '>=1.23.2 <2'
+  'ajv@8': '>=8.18.0 <9'
+  # Per-major floors (like the minimatch/picomatch entries below), not one
+  # blanket override: a bare "brace-expansion" override forces EVERY
+  # consumer onto the same major regardless of what it asked for, which
+  # broke minimatch@3.1.5 (declares brace-expansion@^1.1.7, needs its old
+  # CommonJS function-export shape) by handing it brace-expansion@5's
+  # completely different export shape -- "expand is not a function" at
+  # runtime for anything that transitively pulls in minimatch@3.x (e.g.
+  # @eslint/config-array). Floors bumped to the latest GHSA-patched version
+  # per major (GHSA-rgw5-rvv9-x895 et al.); the old blanket floor (5.0.5)
+  # also predates two of those advisories (patched at 5.0.8 and 5.0.9).
+  'brace-expansion@<2': '>=1.1.18 <2'
+  'brace-expansion@2': '>=2.1.4 <3'
+  'brace-expansion@3': '>=3.0.6 <4'
+  'brace-expansion@5': '>=5.0.9 <6'
+  'cross-spawn': '>=6.0.6'
+  'diff@7': '>=8.0.3 <9'
+  'dompurify': '>=3.4.9 <3.5.0'
+  'esbuild': '>=0.28.1 <1'
+  'fast-uri': '>=3.1.2 <4'
+  'flatted': '>=3.4.2 <4'
+  'form-data': '>=4.0.6 <5'
+  'glob': '>=11.1.0'
+  'handlebars': '>=4.7.9 <5'
+  'http-proxy-middleware': '>=2.0.10 <3'
+  'immutable@5': '>=5.1.5 <6'
+  'joi': '>=18.2.1 <19'
+  'js-yaml': '>=4.2.0 <5'
+  'koa': '>=2.16.4 <3'
+  'lodash': '>=4.18.1 <5'
+  'lodash-es': '>=4.18.1 <5'
+  'markdown-it': '>=14.2.0 <15'
+  'minimatch@<3.1.4': '>=3.1.4 <4'
+  'minimatch@5': '>=5.1.8 <6'
+  'minimatch@9': '>=9.0.7 <10'
+  'minimatch@10': '>=10.2.3 <11'
+  'picomatch@<2.3.2': '>=2.3.2 <3'
+  'picomatch@4': '>=4.0.4 <5'
+  'postcss': '>=8.5.10'
+  'prismjs': '>=1.30.0 <2'
+  'protobufjs': '>=7.6.3 <8'
+  'qs': '>=6.15.2 <7'
+  'react-router': '>=6.30.4 <7'
+  '@docusaurus/core>react-router': '5.3.4'
+  'react-router-config>react-router': '5.3.4'
+  'react-router-dom@5>react-router': '5.3.4'
+  'serialize-javascript': '>=7.0.5 <8'
+  'shell-quote': '>=1.8.4 <2'
+  'svgo@2': '>=2.8.1 <3'
+  'svgo@4': '>=4.0.1 <5'
+  'tar': '>=7.5.16 <8'
+  'tmp': '>=0.2.6 <1'
+  'underscore': '>=1.13.8 <2'
+  'undici': '>=7.28.0 <8'
+  'uuid': '>=11.1.1 <12'
+  'webpack-dev-server': '>=5.2.5 <6'
+  'ws': '>=8.21.0 <9'
+  'yaml@1': '>=1.10.3 <2'
+
+patchedDependencies:
+  'gray-matter@4.0.3': 'patches/gray-matter@4.0.3.patch'
+
+peerDependencyRules:
+  allowedVersions:
+    '@rjsf/mui>@mui/material': '6'
+    '@rjsf/mui>@mui/icons-material': '6'
+    '@mui/icons-material>@mui/material': '6'
+    'react-json-view>react': '18'
+    'react-json-view>react-dom': '18'
+    'flux>react': '18'
+    '@typescript-eslint/utils>eslint': '9'
+
+supportedArchitectures:
+  os:
+    - 'current'
+  cpu:
+    - 'current'
+
 # Only allow postinstall/install scripts for known, trusted packages that
 # require native compilation or binary downloads.
 # See: https://pnpm.io/npmrc#onlybuiltdependencies
