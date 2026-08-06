@@ -226,6 +226,16 @@ class TestImportManagerModuleCleanup:
             leaked = [name for name in sys.modules if name == 'agent_crewai' or name.startswith('agent_crewai.')]
             assert leaked == [], 'the failing import must not leave any agent_crewai* modules cached'
         finally:
+            # update(saved) alone only adds back what was popped above -- it
+            # doesn't remove anything else. If the assertion above is what
+            # fails (i.e. this test is doing its job and catching a real
+            # eviction regression), whatever leaked would stay leaked after
+            # cleanup too, contaminating later tests. Strip every current
+            # agent_crewai* entry first so restoring `saved` lands on
+            # exactly the pre-test state either way.
+            for name in list(sys.modules):
+                if (name == 'agent_crewai' or name.startswith('agent_crewai.')) and name not in saved:
+                    del sys.modules[name]
             sys.modules.update(saved)
 
 
