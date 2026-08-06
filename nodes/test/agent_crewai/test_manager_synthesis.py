@@ -146,9 +146,29 @@ def _scoped_stubs() -> Iterator[None]:
                 sys.modules[name] = module
 
 
-with _scoped_stubs():
-    manager_module = importlib.import_module('agent_crewai.crewai_manager.manager')
+def _import_manager_module() -> Any:
+    """Import crewai_manager.manager under the stubs, then evict every
+    agent_crewai* module the import pulled in from sys.modules.
 
+    Without this, `agent_crewai`, `agent_crewai.crewai_base`, and
+    `agent_crewai.crewai_manager*` would stay cached under their real names
+    but built against these fakes -- a later import of the same names
+    elsewhere in the same pytest session (e.g. a real `builder nodes:test`
+    run where the genuine dependencies are present) would silently get this
+    stub-tainted copy instead of a fresh one. Evicting them here doesn't
+    invalidate the `manager_module`/`CrewManager` references already bound
+    below; sys.modules only governs future imports, not held references.
+    """
+    before = set(sys.modules)
+    with _scoped_stubs():
+        module = importlib.import_module('agent_crewai.crewai_manager.manager')
+    for name in list(sys.modules):
+        if name not in before and (name == 'agent_crewai' or name.startswith('agent_crewai.')):
+            del sys.modules[name]
+    return module
+
+
+manager_module = _import_manager_module()
 CrewManager = manager_module.CrewManager
 
 
