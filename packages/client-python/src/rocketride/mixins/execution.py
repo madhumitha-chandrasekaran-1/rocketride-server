@@ -139,12 +139,17 @@ class ExecutionMixin(DAPClient):
             pipelineTraceLevel: Pipeline trace level ('none', 'metadata', 'summary',
                 'full'). Does NOT add a '_trace' field to this method's response --
                 no such field exists. When set, every lane write and invoke call is
-                captured server-side and rolled up into run analytics on the task's
-                status object instead (``componentStats``, ``slowestDocs``,
-                ``completionSeconds``, ``idleSeconds``, ``idleLongestSeconds``,
-                ``idleLongestAt`` -- see :class:`~rocketride.types.task.TASK_STATUS`),
-                retrieved separately via :meth:`get_task_status`, not from this
-                method's return value.
+                captured server-side as an 'apaevt_flow' event; retrieve the actual
+                call tree through a :class:`~rocketride.log_stream.LogEventStream`
+                monitor session (``client.log.open_event_stream(...)``) via its
+                ``get_traces()``/``get_trace(trace_id)`` methods -- not from this
+                method's return value. The same events are also rolled up into run
+                analytics on the task's status object (``componentStats``,
+                ``slowestDocs``, ``completionSeconds``, ``idleSeconds``,
+                ``idleLongestSeconds``, ``idleLongestAt`` -- see
+                :class:`~rocketride.types.task.TASK_STATUS`), retrieved via
+                :meth:`get_task_status`. Neither is populated when no trace level
+                is set.
 
         Returns:
             Dict containing:
