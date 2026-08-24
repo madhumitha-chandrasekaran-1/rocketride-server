@@ -639,14 +639,24 @@ export class Documents {
 				};
 			}
 
-			// Prefer this call's (possibly freshly re-read) result, UNLESS
-			// something else changed this document while the read was in
-			// flight -- e.g. a concurrent open of the same uri finishing
+			// If this document existed when the read started but is gone now,
+			// something deliberately removed it while the read was in flight --
+			// discardDocument() is the one caller that does this, specifically
+			// because the backing file was deleted from disk. Recreating it
+			// from finalDoc (a read that may have started before the deletion,
+			// or already be racing a since-vanished file) would silently
+			// resurrect a document the system just determined doesn't exist;
+			// respect the removal and abort instead of opening anything.
+			const current = prev.documents[uri];
+			if (initialDoc && !current) return prev;
+
+			// Otherwise, prefer this call's (possibly freshly re-read) result,
+			// UNLESS something else changed this document while the read was
+			// in flight -- e.g. a concurrent open of the same uri finishing
 			// first (in a DIFFERENT group), or the user editing it via another
 			// path. That live state must win over a read that's now stale by
 			// comparison; a referential match against the pre-read snapshot
 			// means nothing raced, so the fresh read is safe to apply.
-			const current = prev.documents[uri];
 			const base = current === initialDoc ? finalDoc : (current ?? finalDoc);
 			const updatedDoc = { ...base, editorCount: (current?.editorCount ?? 0) + 1 };
 			const newEditorIds = [...group.editorIds, editorId];

@@ -49,20 +49,30 @@ import { Documents, type IVirtualFileSystem, type DocumentsState, type Workspace
  * write to the store between two `openDocument` calls. `reads` records every
  * path `read()` was called with, so tests can assert a path was NEVER read
  * (e.g. a static or untitled document, which has nothing on the store to
- * read in the first place). */
+ * read in the first place). `pauseNextRead`/`resumeRead` let a test suspend
+ * a read mid-flight to deterministically interleave another call into the
+ * gap, without relying on timer-based guessing. */
 function makeFakeVfs(initial: Record<string, unknown> = {}): {
 	vfs: IVirtualFileSystem;
 	store: Map<string, unknown>;
 	failNextRead: Set<string>;
 	reads: string[];
+	pauseNextRead: (path: string) => void;
+	resumeRead: (path: string) => void;
 } {
 	const store = new Map<string, unknown>(Object.entries(initial));
 	const failNextRead = new Set<string>();
 	const reads: string[] = [];
+	const pauseOnRead = new Set<string>();
+	const pausedResolvers = new Map<string, () => void>();
 	const vfs: IVirtualFileSystem = {
 		list: async () => [],
 		read: async (path: string) => {
 			reads.push(path);
+			if (pauseOnRead.has(path)) {
+				pauseOnRead.delete(path);
+				await new Promise<void>((resolve) => pausedResolvers.set(path, resolve));
+			}
 			if (failNextRead.has(path)) {
 				failNextRead.delete(path);
 				throw new Error('simulated read failure');
@@ -76,7 +86,17 @@ function makeFakeVfs(initial: Record<string, unknown> = {}): {
 		delete: async () => undefined,
 		mkdir: async () => undefined,
 	};
-	return { vfs, store, failNextRead, reads };
+	return {
+		vfs,
+		store,
+		failNextRead,
+		reads,
+		pauseNextRead: (path: string) => pauseOnRead.add(path),
+		resumeRead: (path: string) => {
+			pausedResolvers.get(path)?.();
+			pausedResolvers.delete(path);
+		},
+	};
 }
 
 /** A DocumentsState as it would come back from persisted workspace appState:
@@ -221,4 +241,27 @@ test('two concurrent opens of the same uri into the same group do not create dup
 	const editorsForUri = group.editorIds.filter((eid) => docs.getState().editors[eid]?.documentUri === 'a.pipe');
 	assert.equal(editorsForUri.length, 1, 'racing two opens of the same document into the same group must not open two tabs');
 	assert.equal(docs.getDocument('a.pipe')?.editorCount, 1, 'editorCount must reflect the single tab actually created, not one per racing call');
+});
+
+test('discarding a document while its re-read is in flight does not resurrect it', async () => {
+	// discardDocument() force-removes a document specifically because its
+	// backing file was deleted from disk. If that races in while a clean
+	// document is being re-read for a second pane, the read's result (which
+	// may have started before the deletion, or is now reading a vanished
+	// file) must not silently bring the document back.
+	const { vfs, pauseNextRead, resumeRead } = makeFakeVfs({ 'a.pipe': 'v1' });
+	const docs = new Documents(vfs);
+	await docs.openDocument('a.pipe'); // cached, clean, one editor in group-1
+
+	const secondGroup = docs.splitGroup('group-1', 'horizontal');
+	pauseNextRead('a.pipe');
+	const reopen = docs.openDocument('a.pipe', secondGroup); // suspends inside vfs.read()
+
+	docs.discardDocument('a.pipe'); // simulates: the backing file was deleted from disk
+	resumeRead('a.pipe');
+	await reopen;
+
+	assert.equal(docs.getDocument('a.pipe'), undefined, 'a document discarded mid-read must not be resurrected');
+	const remainingEditors = Object.values(docs.getState().editors).filter((e) => e.documentUri === 'a.pipe');
+	assert.equal(remainingEditors.length, 0, 'no editor should be created for a document discarded mid-open');
 });
