@@ -67,6 +67,7 @@
 			"description": "Upload the PEM private key generated for your GitHub App. Used to sign short-lived JWTs; never sent to GitHub directly.",
 			"default": "",
 			"optional": true,
+			"secure": true,
 			"ui:options:accept": ".pem"
 		},
 		"github.installationId": {

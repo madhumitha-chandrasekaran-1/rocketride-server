@@ -91,6 +91,21 @@ def _generate_test_private_key_pem() -> str:
 _TEST_PRIVATE_KEY_PEM = _generate_test_private_key_pem()
 
 
+def _generate_test_ec_private_key_pem() -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode('utf-8')
+
+
+_TEST_EC_PRIVATE_KEY_PEM = _generate_test_ec_private_key_pem()
+
+
 def _make_global(IGlobal):
     glb = IGlobal()
     glb.IEndpoint = types.SimpleNamespace(endpoint=types.SimpleNamespace(openMode='open'))
@@ -137,6 +152,22 @@ def test_begin_global_app_invalid_key_raises():
 
         glb = _make_global(IGlobal)
         with pytest.raises(ValueError, match='invalid GitHub App private key'):
+            glb.beginGlobal()
+
+
+def test_begin_global_app_non_rsa_key_raises():
+    with _scoped_stubs(
+        {
+            'authType': 'app',
+            'appId': '123',
+            'privateKey': _TEST_EC_PRIVATE_KEY_PEM,
+            'installationId': '456',
+        }
+    ):
+        from tool_github.IGlobal import IGlobal
+
+        glb = _make_global(IGlobal)
+        with pytest.raises(ValueError, match='must be an RSA key'):
             glb.beginGlobal()
 
 

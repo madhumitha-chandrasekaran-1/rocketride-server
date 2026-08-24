@@ -97,13 +97,17 @@ APP_JWT_TTL_SECONDS = 570
 
 
 def load_app_private_key(pem_text: str):
-    """Parse a PEM RSA private key for a GitHub App. Raises ValueError on malformed input."""
+    """Parse a PEM RSA private key for a GitHub App. Raises ValueError on malformed or non-RSA input."""
     from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
     try:
-        return serialization.load_pem_private_key((pem_text or '').encode('utf-8'), password=None)
+        key = serialization.load_pem_private_key((pem_text or '').encode('utf-8'), password=None)
     except (ValueError, TypeError) as exc:
         raise ValueError(f'tool_github: invalid GitHub App private key: {exc}') from exc
+    if not isinstance(key, RSAPrivateKey):
+        raise ValueError('tool_github: GitHub App private key must be an RSA key (RS256 signing)')
+    return key
 
 
 def _b64url(data: bytes) -> str:
@@ -119,10 +123,9 @@ def _sign_app_jwt(app_id: str, private_key_pem: str) -> str:
     now = int(time.time())
     header = {'alg': 'RS256', 'typ': 'JWT'}
     payload = {'iat': now - 60, 'exp': now + APP_JWT_TTL_SECONDS, 'iss': app_id}
-    signing_input = (
-        f'{_b64url(json.dumps(header, separators=(",", ":")).encode())}.'
-        f'{_b64url(json.dumps(payload, separators=(",", ":")).encode())}'
-    )
+    header_b64 = _b64url(json.dumps(header, separators=(',', ':')).encode())
+    payload_b64 = _b64url(json.dumps(payload, separators=(',', ':')).encode())
+    signing_input = f'{header_b64}.{payload_b64}'
     signature = key.sign(signing_input.encode('ascii'), padding.PKCS1v15(), hashes.SHA256())
     return f'{signing_input}.{_b64url(signature)}'
 

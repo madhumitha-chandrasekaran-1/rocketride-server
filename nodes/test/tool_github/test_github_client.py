@@ -237,6 +237,21 @@ def _generate_test_private_key_pem() -> str:
 _TEST_PRIVATE_KEY_PEM = _generate_test_private_key_pem()
 
 
+def _generate_test_ec_private_key_pem() -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode('utf-8')
+
+
+_TEST_EC_PRIVATE_KEY_PEM = _generate_test_ec_private_key_pem()
+
+
 def _decode_jwt_parts(jwt_token: str):
     import base64
     import json
@@ -257,6 +272,11 @@ def test_load_app_private_key_valid():
 def test_load_app_private_key_invalid():
     with pytest.raises(ValueError, match='invalid GitHub App private key'):
         load_app_private_key('not a real pem')
+
+
+def test_load_app_private_key_rejects_non_rsa():
+    with pytest.raises(ValueError, match='must be an RSA key'):
+        load_app_private_key(_TEST_EC_PRIVATE_KEY_PEM)
 
 
 @patch('tool_github.github_client.requests.request')
