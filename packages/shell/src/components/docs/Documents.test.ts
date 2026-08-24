@@ -204,3 +204,21 @@ test('an untitled document reopened in another group keeps isNew true and is nev
 	assert.equal(docs.getDocument(uri)?.content, 'draft content');
 	assert.equal(reads.includes(uri), false, 'an untitled document must never be read from the VFS');
 });
+
+test('two concurrent opens of the same uri into the same group do not create duplicate tabs', async () => {
+	// The "already open in this group" check at the top of openDocument runs
+	// on a snapshot taken before the VFS read below it. If that read actually
+	// suspends (a real await, which a Promise-returning read always causes at
+	// least once), a second openDocument(uri, group) call for the identical
+	// document can run entirely in between and commit its own editor first --
+	// racing both calls here reproduces exactly that interleaving.
+	const { vfs } = makeFakeVfs({ 'a.pipe': 'v1' });
+	const docs = new Documents(vfs);
+
+	await Promise.all([docs.openDocument('a.pipe', 'group-1'), docs.openDocument('a.pipe', 'group-1')]);
+
+	const group = docs.getState().groups['group-1']!;
+	const editorsForUri = group.editorIds.filter((eid) => docs.getState().editors[eid]?.documentUri === 'a.pipe');
+	assert.equal(editorsForUri.length, 1, 'racing two opens of the same document into the same group must not open two tabs');
+	assert.equal(docs.getDocument('a.pipe')?.editorCount, 1, 'editorCount must reflect the single tab actually created, not one per racing call');
+});

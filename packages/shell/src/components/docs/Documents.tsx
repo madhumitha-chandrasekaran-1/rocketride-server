@@ -618,18 +618,37 @@ export class Documents {
 
 		const finalDoc = doc;
 		this._update((prev) => {
+			const group = prev.groups[targetGroup];
+			if (!group) return prev;
+
+			// The "already open in this group" check at the top of this method
+			// ran on a snapshot taken before the read above -- if that read
+			// actually suspended (an await), a second openDocument(uri,
+			// targetGroup) call (e.g. a rapid double-click) could have run
+			// entirely in between and already committed its own new editor for
+			// this exact uri+group. Re-checking here, against the LATEST state,
+			// catches that: activate the editor it already added instead of
+			// piling on a duplicate tab for the same document in the same pane.
+			const racedEditorId = group.editorIds.find((eid) => prev.editors[eid]?.documentUri === uri);
+			if (racedEditorId) {
+				const idx = group.editorIds.indexOf(racedEditorId);
+				return {
+					...prev,
+					groups: { ...prev.groups, [targetGroup]: { ...group, activeEditorIndex: idx } },
+					activeGroupId: targetGroup,
+				};
+			}
+
 			// Prefer this call's (possibly freshly re-read) result, UNLESS
 			// something else changed this document while the read was in
 			// flight -- e.g. a concurrent open of the same uri finishing
-			// first, or the user editing it via another path. That live
-			// state must win over a read that's now stale by comparison; a
-			// referential match against the pre-read snapshot means nothing
-			// raced, so the fresh read is safe to apply.
+			// first (in a DIFFERENT group), or the user editing it via another
+			// path. That live state must win over a read that's now stale by
+			// comparison; a referential match against the pre-read snapshot
+			// means nothing raced, so the fresh read is safe to apply.
 			const current = prev.documents[uri];
 			const base = current === initialDoc ? finalDoc : (current ?? finalDoc);
 			const updatedDoc = { ...base, editorCount: (current?.editorCount ?? 0) + 1 };
-			const group = prev.groups[targetGroup];
-			if (!group) return prev;
 			const newEditorIds = [...group.editorIds, editorId];
 			return {
 				...prev,
