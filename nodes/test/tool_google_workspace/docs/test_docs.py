@@ -295,7 +295,7 @@ def test_check_connection_probe_swallows_expected_404():
 
 def test_check_connection_reports_probe_failure():
     """A disabled Docs API (accessNotConfigured) must flip connection_ok, not be swallowed."""
-    err = _HttpErr(403, 'accessNotConfigured', content=b'{"error": {"errors": [{"reason": "accessNotConfigured"}]}}')
+    err = _HttpErr(403, 'Forbidden', content=b'{"error": {"errors": [{"reason": "accessNotConfigured"}]}}')
     inst = _make(results={'get': err})
     out = inst.check_connection({})
     assert out['connection_ok'] is False

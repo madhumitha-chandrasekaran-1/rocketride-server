@@ -579,7 +579,7 @@ def test_check_connection_probes_gmail_api():
 
 def test_check_connection_reports_probe_failure():
     """A disabled Gmail API (accessNotConfigured) must flip connection_ok, not be swallowed."""
-    err = _HttpErr(403, 'accessNotConfigured', content=b'{"error": {"errors": [{"reason": "accessNotConfigured"}]}}')
+    err = _HttpErr(403, 'Forbidden', content=b'{"error": {"errors": [{"reason": "accessNotConfigured"}]}}')
     inst = make_inst(results={'getProfile': err})
     out = inst.check_connection({})
     assert out['connection_ok'] is False
