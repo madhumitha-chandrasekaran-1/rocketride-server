@@ -194,6 +194,22 @@ test('a failed re-read falls back to the previously cached content instead of cl
 	assert.equal(docs2.getDocument('a.pipe')?.isNew, false, 'a document recovered from cache after a failed read is not "new"');
 });
 
+test('a cached null content is preserved when a re-read fails, not replaced with empty string', async () => {
+	// A document's content can legitimately be `null` -- e.g. saved that way
+	// via updateContent(uri, null) then saveDocument(), which preserves
+	// content verbatim while only flipping `dirty`. `doc?.content ?? ''`
+	// would treat that valid null the same as "no cached document at all"
+	// and clobber it with '' before the read even runs -- permanently, once
+	// the read then fails and there's nothing to overwrite it with.
+	const { vfs, failNextRead } = makeFakeVfs({ 'a.pipe': null });
+	failNextRead.add('a.pipe');
+	const docs = new Documents(vfs, makeWorkspace(makePersistedState('a.pipe', null)));
+
+	await docs.openDocument('a.pipe');
+
+	assert.equal(docs.getDocument('a.pipe')?.content, null, 'a legitimately null cached content must survive a failed re-read, not become an empty string');
+});
+
 test('a static document reopened in another group stays static and is never read from the VFS', async () => {
 	// static documents (e.g. a monitor/webview panel) are explicitly not
 	// backed by the VFS -- there's nothing on the store for a freshness

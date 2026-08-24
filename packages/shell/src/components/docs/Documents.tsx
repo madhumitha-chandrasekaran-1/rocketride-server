@@ -589,7 +589,12 @@ export class Documents {
 		const initialDoc = s.documents[uri];
 		let doc = initialDoc;
 		if (!doc || (!doc.dirty && !doc.static && !doc.isNew)) {
-			let content: unknown = doc?.content ?? '';
+			// `doc?.content ?? ''` would be wrong here: a saved document can
+			// legitimately carry `null` (or any other falsy-but-not-missing
+			// value) as its content -- saveDocument() preserves content
+			// verbatim while only flipping `dirty`. Only fall back to '' when
+			// there's no cached document at all to read content from.
+			let content: unknown = doc ? doc.content : '';
 			let loadedOk = !!doc; // a prior cached copy is a valid fallback if the read below fails
 			if (this._vfs) {
 				try {
