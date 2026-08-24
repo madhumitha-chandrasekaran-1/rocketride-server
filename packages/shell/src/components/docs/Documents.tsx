@@ -570,11 +570,17 @@ export class Documents {
 			return;
 		}
 
-		// Load content if document not yet open
-		let doc = s.documents[uri];
-		if (!doc) {
-			let content: unknown = '';
-			let loadedOk = false;
+		// Load content when the document isn't open yet, or IS open but clean
+		// (nothing local to protect). A clean cached entry can be stale relative
+		// to the backing store -- restored from a persisted session, or written
+		// externally (another client, a direct store write) since it was last
+		// read -- so it's never trusted indefinitely; only a DIRTY document
+		// (genuine unsaved edits) is worth keeping as-is rather than re-read.
+		const initialDoc = s.documents[uri];
+		let doc = initialDoc;
+		if (!doc || !doc.dirty) {
+			let content: unknown = doc?.content ?? '';
+			let loadedOk = !!doc; // a prior cached copy is a valid fallback if the read below fails
 			if (this._vfs) {
 				try {
 					const raw = await this._vfs.read(uri);
@@ -583,10 +589,10 @@ export class Documents {
 						loadedOk = true;
 					}
 				} catch {
-					/* read failed */
+					/* read failed -- fall back to whatever we already had, if anything */
 				}
 			}
-			doc = { uri, content, dirty: false, version: 1, editorCount: 0, isNew: !loadedOk };
+			doc = { uri, content, dirty: false, version: (doc?.version ?? 0) + 1, editorCount: 0, isNew: !loadedOk };
 		}
 
 		const editorId = this._nextEditorId();
@@ -602,7 +608,16 @@ export class Documents {
 
 		const finalDoc = doc;
 		this._update((prev) => {
-			const updatedDoc = { ...(prev.documents[uri] ?? finalDoc), editorCount: (prev.documents[uri]?.editorCount ?? 0) + 1 };
+			// Prefer this call's (possibly freshly re-read) result, UNLESS
+			// something else changed this document while the read was in
+			// flight -- e.g. a concurrent open of the same uri finishing
+			// first, or the user editing it via another path. That live
+			// state must win over a read that's now stale by comparison; a
+			// referential match against the pre-read snapshot means nothing
+			// raced, so the fresh read is safe to apply.
+			const current = prev.documents[uri];
+			const base = current === initialDoc ? finalDoc : (current ?? finalDoc);
+			const updatedDoc = { ...base, editorCount: (current?.editorCount ?? 0) + 1 };
 			const group = prev.groups[targetGroup];
 			if (!group) return prev;
 			const newEditorIds = [...group.editorIds, editorId];
