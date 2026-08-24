@@ -46,13 +46,23 @@ import test from 'node:test';
 import { Documents, type IVirtualFileSystem, type DocumentsState, type WorkspaceBinding } from './Documents';
 
 /** In-memory VFS backed by a mutable Map, so tests can simulate an external
- * write to the store between two `openDocument` calls. */
-function makeFakeVfs(initial: Record<string, unknown> = {}): { vfs: IVirtualFileSystem; store: Map<string, unknown>; failNextRead: Set<string> } {
+ * write to the store between two `openDocument` calls. `reads` records every
+ * path `read()` was called with, so tests can assert a path was NEVER read
+ * (e.g. a static or untitled document, which has nothing on the store to
+ * read in the first place). */
+function makeFakeVfs(initial: Record<string, unknown> = {}): {
+	vfs: IVirtualFileSystem;
+	store: Map<string, unknown>;
+	failNextRead: Set<string>;
+	reads: string[];
+} {
 	const store = new Map<string, unknown>(Object.entries(initial));
 	const failNextRead = new Set<string>();
+	const reads: string[] = [];
 	const vfs: IVirtualFileSystem = {
 		list: async () => [],
 		read: async (path: string) => {
+			reads.push(path);
 			if (failNextRead.has(path)) {
 				failNextRead.delete(path);
 				throw new Error('simulated read failure');
@@ -66,7 +76,7 @@ function makeFakeVfs(initial: Record<string, unknown> = {}): { vfs: IVirtualFile
 		delete: async () => undefined,
 		mkdir: async () => undefined,
 	};
-	return { vfs, store, failNextRead };
+	return { vfs, store, failNextRead, reads };
 }
 
 /** A DocumentsState as it would come back from persisted workspace appState:
@@ -162,4 +172,35 @@ test('a failed re-read falls back to the previously cached content instead of cl
 
 	assert.equal(docs2.getDocument('a.pipe')?.content, 'v1', 'a failed read must not wipe out the last known-good content');
 	assert.equal(docs2.getDocument('a.pipe')?.isNew, false, 'a document recovered from cache after a failed read is not "new"');
+});
+
+test('a static document reopened in another group stays static and is never read from the VFS', async () => {
+	// static documents (e.g. a monitor/webview panel) are explicitly not
+	// backed by the VFS -- there's nothing on the store for a freshness
+	// check to mean anything, and openDocument must not try one.
+	const { vfs, reads } = makeFakeVfs();
+	const docs = new Documents(vfs);
+	docs.openStaticDocument('monitor', 'Monitor', 'live status');
+
+	const secondGroup = docs.splitGroup('group-1', 'horizontal');
+	await docs.openDocument('monitor', secondGroup);
+
+	assert.equal(docs.getDocument('monitor')?.static, true, 'reopening in another group must not drop the static flag');
+	assert.equal(docs.getDocument('monitor')?.content, 'live status');
+	assert.equal(reads.includes('monitor'), false, 'a static document must never be read from the VFS');
+});
+
+test('an untitled document reopened in another group keeps isNew true and is never read from the VFS', async () => {
+	// isNew (untitled) documents have never been saved -- there's no store
+	// counterpart to re-read, and doing so would falsely mark them saved.
+	const { vfs, reads } = makeFakeVfs();
+	const docs = new Documents(vfs);
+	const uri = docs.createDocument(undefined, 'draft content');
+
+	const secondGroup = docs.splitGroup('group-1', 'horizontal');
+	await docs.openDocument(uri, secondGroup);
+
+	assert.equal(docs.getDocument(uri)?.isNew, true, 'reopening in another group must not clear isNew');
+	assert.equal(docs.getDocument(uri)?.content, 'draft content');
+	assert.equal(reads.includes(uri), false, 'an untitled document must never be read from the VFS');
 });

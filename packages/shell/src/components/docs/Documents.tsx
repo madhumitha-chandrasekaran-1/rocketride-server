@@ -576,9 +576,19 @@ export class Documents {
 		// externally (another client, a direct store write) since it was last
 		// read -- so it's never trusted indefinitely; only a DIRTY document
 		// (genuine unsaved edits) is worth keeping as-is rather than re-read.
+		//
+		// static and isNew documents are exempt from that re-read even though
+		// both are also always clean: static documents are explicitly not
+		// backed by the VFS (saveDocument itself skips them), and an isNew
+		// (untitled) document has no counterpart on the store to validate
+		// freshness against. Re-reading either would call vfs.read() on a URI
+		// that was never a real file, and reconstructing the Document below
+		// would drop `static`/`isNew` since neither field is carried over --
+		// silently turning a static panel into a VFS-backed one, or an
+		// unsaved scratch buffer into what looks like a saved file.
 		const initialDoc = s.documents[uri];
 		let doc = initialDoc;
-		if (!doc || !doc.dirty) {
+		if (!doc || (!doc.dirty && !doc.static && !doc.isNew)) {
 			let content: unknown = doc?.content ?? '';
 			let loadedOk = !!doc; // a prior cached copy is a valid fallback if the read below fails
 			if (this._vfs) {
