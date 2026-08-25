@@ -136,20 +136,22 @@ class ExecutionMixin(DAPClient):
             args: Command-line style arguments to pass to the pipeline
             ttl: Time-to-live in seconds for idle pipelines (optional, server default
                 if not provided; use 0 for no timeout)
-            pipelineTraceLevel: Pipeline trace level ('none', 'metadata', 'summary',
-                'full'). Does NOT add a '_trace' field to this method's response --
-                no such field exists. When set, every lane write and invoke call is
-                captured server-side as an 'apaevt_flow' event; retrieve the actual
-                call tree through a :class:`~rocketride.log_stream.LogEventStream`
-                monitor session (``client.log.open_event_stream(...)``) via its
-                ``get_traces()``/``get_trace(trace_id)`` methods -- not from this
-                method's return value. The same events are also rolled up into run
-                analytics on the task's status object (``componentStats``,
+            pipelineTraceLevel: Pipeline trace level ('none' -- the default if
+                omitted -- 'metadata', 'summary', or 'full'). Does NOT add a
+                '_trace' field to this method's response -- no such field exists.
+                For any level other than 'none', every lane write and invoke call
+                is captured server-side as an 'apaevt_flow' event and rolled up
+                into run analytics on the task's status object (``componentStats``,
                 ``slowestDocs``, ``completionSeconds``, ``idleSeconds``,
                 ``idleLongestSeconds``, ``idleLongestAt`` -- see
                 :class:`~rocketride.types.task.TASK_STATUS`), retrieved via
-                :meth:`get_task_status`. Neither is populated when no trace level
-                is set.
+                :meth:`get_task_status`; both stay empty at 'none'. Retrieve the
+                call tree through a :class:`~rocketride.log_stream.LogEventStream`
+                monitor session: ``client.log.open_event_stream(...)``, then
+                ``await session.seek('live')`` (or another position) before
+                ``get_traces(n)`` -- it reads state as of the session's position
+                and returns nothing before a seek. ``get_trace(trace_id)`` is
+                position-independent and needs no prior seek.
 
         Returns:
             Dict containing:
