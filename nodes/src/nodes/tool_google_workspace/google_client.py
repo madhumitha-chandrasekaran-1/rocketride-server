@@ -147,16 +147,37 @@ def resolve_token_uri(svc: GoogleService, token_uri: object) -> str:
     return token_uri
 
 
-def _structured_errors(exc: Exception) -> list[dict]:
-    """Parse the JSON error body's ``error.errors[]`` list, or ``[]`` if absent/malformed."""
+def _parsed_error_body(exc: Exception) -> dict:
+    """Return the JSON error body's ``error`` object, or ``{}`` if absent/malformed."""
     content = getattr(exc, 'content', b'') or b''
     if isinstance(content, bytes):
         content = content.decode('utf-8', 'replace')
     try:
-        errors = (json.loads(content).get('error') or {}).get('errors') or []
-        return [e for e in errors if isinstance(e, dict)]
+        error = json.loads(content).get('error')
+        return error if isinstance(error, dict) else {}
     except (ValueError, AttributeError, TypeError):
-        return []
+        return {}
+
+
+def _structured_errors(exc: Exception) -> list[dict]:
+    """Parse the JSON error body's reason-carrying entries, in either Google error shape.
+
+    Legacy Discovery-style APIs (Gmail, Drive) carry ``error.errors[]``, each item
+    already holding a ``reason`` (e.g. ``accessNotConfigured``). One Platform APIs
+    (Sheets, Docs) carry no ``errors[]`` at all — the reason instead lives in a
+    ``google.rpc.ErrorInfo`` entry inside ``error.details[]`` (e.g. ``reason:
+    'SERVICE_DISABLED'``). Returns whichever shape is present, or ``[]`` if the
+    body has neither (or is absent/malformed).
+    """
+    error = _parsed_error_body(exc)
+    legacy = [e for e in (error.get('errors') or []) if isinstance(e, dict)]
+    if legacy:
+        return legacy
+    return [
+        d
+        for d in (error.get('details') or [])
+        if isinstance(d, dict) and d.get('@type') == 'type.googleapis.com/google.rpc.ErrorInfo'
+    ]
 
 
 def _error_reason_code(exc: Exception) -> str | None:
@@ -164,12 +185,17 @@ def _error_reason_code(exc: Exception) -> str | None:
 
     Google distinguishes ``accessNotConfigured`` (API disabled on the project),
     ``forbidden`` (permission), and ``rateLimitExceeded``/``quotaExceeded`` under the
-    same HTTP 403 — the reason code is what actually names the fix.
+    same HTTP 403 — the reason code is what actually names the fix. Legacy APIs
+    carry it in ``error.errors[].reason``; One Platform APIs carry it in an
+    ``error.details[]`` ErrorInfo's ``reason`` (SCREAMING_SNAKE_CASE, e.g.
+    ``SERVICE_DISABLED``), and when even that detail is absent this falls back to
+    the coarser gRPC ``error.status`` (e.g. ``PERMISSION_DENIED``).
     """
     for e in _structured_errors(exc):
         if e.get('reason'):
             return str(e['reason'])
-    return None
+    status = _parsed_error_body(exc).get('status')
+    return str(status) if status else None
 
 
 def _is_rate_limit_403(exc: Exception) -> bool:
@@ -179,11 +205,16 @@ def _is_rate_limit_403(exc: Exception) -> bool:
         return False
     rate_reasons = {'ratelimitexceeded', 'userratelimitexceeded', 'quotaexceeded'}
     structured = _structured_errors(exc)
-    # Prefer the structured error body (error.errors[].reason) over substring matching.
+    # Prefer the structured error body over substring matching. Normalize away
+    # underscores so One Platform's SCREAMING_SNAKE_CASE ErrorInfo reasons (e.g.
+    # 'RATE_LIMIT_EXCEEDED') match the legacy camelCase set above.
     if structured:
-        reasons = {str(e.get('reason', '')).lower() for e in structured}
+        reasons = {str(e.get('reason', '')).lower().replace('_', '') for e in structured}
         return bool(reasons & rate_reasons)
-    # Fallback for non-JSON bodies and transport-level wrappers.
+    # Fallback for non-JSON bodies, transport-level wrappers, and any reason
+    # taxonomy _structured_errors doesn't recognize (e.g. a details[] entry
+    # whose @type isn't ErrorInfo) — keep this even as the parser above grows,
+    # since it is the only path a shape neither branch above covers still hits.
     content = getattr(exc, 'content', b'') or b''
     if isinstance(content, bytes):
         content = content.decode('utf-8', 'replace')
@@ -446,8 +477,8 @@ def execute(svc: GoogleService, request: Any, *, binary: bool = False) -> Any:
                     f'{svc.product} API 403 ({reason_code or "forbidden"}): {detail}. If this is a scope '
                     'error, disconnect and reconnect your Google account with the required access tier. '
                     'If it is a sharing/ownership error, the account may lack permission on that resource. '
-                    'If it is accessNotConfigured, the Google Cloud project behind this credential has not '
-                    'enabled this API.'
+                    'If it is accessNotConfigured or SERVICE_DISABLED, the Google Cloud project behind '
+                    'this credential has not enabled this API.'
                 )
             else:
                 prefix = f'{svc.product} API {status}: ' if status else f'{svc.product} request failed: '

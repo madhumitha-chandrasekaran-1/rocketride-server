@@ -721,7 +721,7 @@ def test_check_connection_reports_malformed_token(monkeypatch):
     inst.IGlobal.glb = types.SimpleNamespace(logicalType='tool_docs', connConfig={})
     out = inst.check_connection({})
     assert out['connection_ok'] is False
-    assert 'invalid user token' in out['error']
+    assert 'invalid user token' in out['scopeError']
 
 
 def test_validate_config_warns_for_malformed_user_token(monkeypatch):

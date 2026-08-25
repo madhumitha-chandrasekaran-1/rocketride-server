@@ -116,7 +116,11 @@ class GoogleToolInstanceBase(IInstanceBase):
                 probe(service)
             except Exception as exc:
                 out['connection_ok'] = False
-                out['error'] = str(exc)[:200]
+                # Generous cap: the actionable guidance (scope/sharing/accessNotConfigured
+                # hints) trails the raw Google message, and errorReason below is the
+                # machine-readable fallback, but a human reading just `error` should still
+                # see the clause that names the fix rather than have it cut mid-sentence.
+                out['error'] = str(exc)[:500]
                 reason_code = getattr(exc, 'reason_code', None)
                 if reason_code:
                     out['errorReason'] = reason_code
@@ -135,7 +139,10 @@ class GoogleToolInstanceBase(IInstanceBase):
                             out['missingScopes'] = missing
                     except Exception as exc:
                         out['connection_ok'] = False
-                        out['error'] = f'invalid user token data: {str(exc)[:160]}'
+                        # A separate key: 'error' may already hold the probe's failure
+                        # (checked above the scope check), and overwriting it here would
+                        # lose that message.
+                        out['scopeError'] = f'invalid user token data: {str(exc)[:160]}'
         except Exception:
             pass  # config lookup diagnostics must never raise
         out['checked'] = checked
