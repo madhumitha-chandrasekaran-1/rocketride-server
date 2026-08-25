@@ -435,7 +435,7 @@ Start a RocketRide pipeline for processing data. Automatically performs environm
 - `useExisting?: boolean` - Use existing pipeline instance
 - `args?: string[]` - Command line arguments to pass to pipeline
 - `ttl?: number` - Time-to-live in seconds for idle pipelines (optional, server default if not provided; use 0 for no timeout)
-- `pipelineTraceLevel?: 'none' | 'metadata' | 'summary' | 'full'` - When set, captures every lane write and invoke call in the response under `_trace`
+- `pipelineTraceLevel?: 'none' | 'metadata' | 'summary' | 'full'` - Does not add a `_trace` field to this response -- when set, every lane write and invoke call is captured server-side as an `apaevt_flow` event, retrievable as a call tree via a `LogEventStream` monitor session (`client.log.openEventStream(...)`, then `getTraces()`/`getTrace(traceId)`), and rolled up into run analytics on the task status (`componentStats`, `slowestDocs`, `completionSeconds`, `idleSeconds`, `idleLongestSeconds`, `idleLongestAt`) via `getTaskStatus`. Neither is populated when no trace level is set.
 
 ##### `terminate(token: string): Promise<void>`
 

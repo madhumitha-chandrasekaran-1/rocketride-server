@@ -453,7 +453,7 @@ Start a RocketRide pipeline for processing data. Automatically performs environm
 - `use_existing` (bool, optional): Use existing pipeline instance
 - `args` (List[str], optional): Command line arguments to pass to pipeline
 - `ttl` (int, optional): Time-to-live in seconds for idle pipelines (server default if not provided; use 0 for no timeout)
-- `pipelineTraceLevel` (str, optional): Trace level: 'none', 'metadata', 'summary', or 'full'. When set, captures every lane write and invoke call in the response under `_trace`.
+- `pipelineTraceLevel` (str, optional): Trace level: 'none', 'metadata', 'summary', or 'full'. Does NOT add a `_trace` field to this response -- when set, every lane write and invoke call is captured server-side as an `apaevt_flow` event, retrievable as a call tree via a `LogEventStream` monitor session (`client.log.open_event_stream(...)`, then `get_traces()`/`get_trace(trace_id)`), and rolled up into run analytics on the task status (`componentStats`, `slowestDocs`, `completionSeconds`, `idleSeconds`, `idleLongestSeconds`, `idleLongestAt`) via `get_task_status`. Neither is populated when no trace level is set.
 
 **Returns:** Dictionary containing the task token and other metadata
 
