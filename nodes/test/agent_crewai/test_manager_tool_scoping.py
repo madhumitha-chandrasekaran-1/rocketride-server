@@ -135,6 +135,21 @@ class TestCrewAIToolBackfill:
         handoff = _Task('sub-request', agent=delegate)
         assert handoff.tools == ['deal_search']
 
+    def test_a_wired_manager_tool_reaches_the_resolved_executor_set(self):
+        """The manager's own `tool` channel must actually land on the tools the
+        engine resolves for it -- not just on manager_agent.tools in isolation.
+
+        A wired channel tool (e.g. a dedup/lookup check) has to survive the same
+        `task.tools or agent_to_use.tools` resolution the isolation tests above
+        pin, or it is connectable but never actually usable.
+        """
+        delegate = _Agent('Deal Desk', ['deal_search'])
+        manager = _Agent('Manager', ['dedup_lookup'])  # manager's own `tool` channel, wired
+        task = _Task('work the deal', agent=delegate)
+        task.tools = []  # what manager.py does
+
+        assert _resolve_executor_tools(task, manager) == ['dedup_lookup']
+
 
 # ---------------------------------------------------------------------------
 # Our side of the contract

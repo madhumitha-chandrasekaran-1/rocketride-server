@@ -19,7 +19,7 @@
 			"min": 1
 		},
 		"tool": {
-			"description": "Cross-cutting tools available to the manager itself (via control-plane invoke), e.g. dedup/lookup checks the manager should run before finalizing a delegated result",
+			"description": "Cross-cutting tools available to the manager itself (via control-plane invoke)",
 			"min": 0
 		}
 	},
