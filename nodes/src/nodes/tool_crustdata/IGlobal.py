@@ -57,10 +57,7 @@ class IGlobal(IGlobalBase):
             raise ValueError('tool_crustdata: apikey is required')
 
         self.apikey = apikey
-        raw_limit = cfg.get('defaultLimit', 10)
-        if raw_limit is None:
-            raw_limit = 10
-        self.default_limit = max(1, min(100, int(raw_limit)))
+        self.default_limit = _coerce_limit(cfg.get('defaultLimit', 10))
 
     def validateConfig(self) -> None:
         try:
@@ -68,8 +65,32 @@ class IGlobal(IGlobalBase):
             apikey = str(cfg.get('apikey') or os.environ.get('CRUSTDATA_API_KEY', '')).strip()
             if not apikey:
                 warning('apikey is required')
+            raw_limit = cfg.get('defaultLimit')
+            if raw_limit is not None and not isinstance(raw_limit, bool):
+                try:
+                    int(raw_limit)
+                except (TypeError, ValueError):
+                    warning(f'defaultLimit {raw_limit!r} is not a valid integer; will fall back to 10')
         except Exception as e:
             warning(str(e))
 
     def endGlobal(self) -> None:
         self.apikey = ''
+
+
+def _coerce_limit(raw_limit: object, *, default: int = 10) -> int:
+    """Clamp a config value to [1, 1000], falling back to ``default`` on any bad input.
+
+    ``Config.getNodeConfig`` returns whatever is in the (user-editable) pipe
+    file verbatim -- the field's declared ``"type": "integer"`` in
+    services.json constrains the UI form, not a hand-edited file or an SDK
+    caller, so a non-numeric value here must degrade gracefully rather than
+    raise out of beginGlobal.
+    """
+    if raw_limit is None or isinstance(raw_limit, bool):
+        raw_limit = default
+    try:
+        value = int(raw_limit)
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(1000, value))

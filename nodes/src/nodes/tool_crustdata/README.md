@@ -3,23 +3,29 @@
 A RocketRide tool node that gives an AI agent B2B company and people search powered by
 [Crustdata](https://crustdata.com)'s discovery API.
 
-> Experimental: this node is marked `experimental` and may change. The request/response
-> shapes here are built from Crustdata's public documentation, not verified against a
-> live account — see [#2129](https://github.com/rocketride-org/rocketride-server/issues/2129).
+> Experimental: this node is marked `experimental` and may change. The endpoints and
+> request/response schema here are read directly from Crustdata's versioned API
+> reference (`x-api-version: 2025-11-01`), but no live account has exercised it
+> end-to-end — see [#2129](https://github.com/rocketride-org/rocketride-server/issues/2129).
 
 ## What it does
 
 When an agent calls `company_search` or `person_search`, the node runs a filter-based
-search against Crustdata's `/company/search` or `/person-docs/search` REST API and
+search against Crustdata's `POST /company/search` or `POST /person/search` REST API and
 hands back structured records: firmographics, funding, headcount, and hiring signals
 for companies; title, work history, education, and verified contact info for people.
 
-Filters are passed through close to Crustdata's own vocabulary — a list of
-`{filter_type, type, value}` objects (e.g. `{"filter_type": "CURRENT_COMPANY", "type":
-"in", "value": ["Acme Corp"]}`) — rather than remapped into a simplified schema, since
-the exhaustive `filter_type` enum isn't confirmed yet. This is a **search/discovery**
-tool (find records matching criteria), not a single-entity enrichment lookup by domain
-or email.
+Filters are a list of `{field, type, value}` conditions (e.g. `{"field":
+"basic_info.primary_domain", "type": "=", "value": "acme.com"}`) — the node wraps them
+into Crustdata's `{"op": <match>, "conditions": [...]}` group form before sending, so
+callers just supply a flat list plus an optional `match` ("and"/"or"/"all_of", default
+"and"). This is a **search/discovery** tool (find records matching criteria), not a
+single-entity enrichment lookup by domain or email.
+
+Pagination is cursor-based, per Crustdata's API: a response's `next_cursor` is passed
+back as `cursor` on the next call. Crustdata's docs note that changing `filters` or
+`sorts` between pages invalidates the cursor, so pass an explicit `sorts` when
+paginating to keep ordering stable.
 
 Implemented with the **requests** library, no Crustdata SDK is used. Requests time out
 after 30 seconds and are retried up to 3 times with exponential backoff (2 s base delay)
@@ -29,11 +35,6 @@ the agent as a structured `{"success": false, "error": ...}` result rather than 
 The node has no pipeline lanes (`lanes` is `{}`). Only agent runtimes reach it, through
 the `invoke` capability.
 
-Because the response envelope isn't confirmed either, `_extract_records` looks for the
-record list under several plausible top-level keys (`results`, `data`, `companies`,
-`people`, `profiles`) rather than assuming one — see the module docstring in
-`IInstance.py` for the reasoning.
-
 ---
 
 ## Configuration
@@ -41,9 +42,9 @@ record list under several plausible top-level keys (`results`, `data`, `companie
 | Field | Type | Description |
 |---|---|---|
 | `apikey` | string | Default empty. Crustdata API key (from https://crustdata.com) |
-| `defaultLimit` | integer | Default 10. Default maximum number of results per search (1-100) |
+| `defaultLimit` | integer | Default 10. Default maximum number of results per search (1-1000) |
 
-The config values act as defaults; the agent can override `limit` and `page` per call.
+The config values act as defaults; the agent can override `limit` per call.
 
 ---
 
@@ -64,9 +65,11 @@ region, and more). `filters` is the only required parameter.
 | `company_search` | Search Crustdata for companies matching one or more filters. Returns structured company records: firmographics, funding history, headcount, and hiring signals. Use this to find prospects or research accounts by criteria, not to look up one already-known company by name. |
 | `person_search` | Search Crustdata for people matching one or more filters. Returns structured profiles: name, title, work history, education, and verified contact info where available. Use this to find or enrich people by criteria. |
 
-Both return an object with `success`, `filters` (echoed back), `count`, `results`
-(array of raw Crustdata records — exact per-record fields aren't remapped, since the
-schema isn't confirmed), and `error` on failure.
+Both accept `filters` (required, a list of `{field, type, value}` conditions), plus
+optional `match` (how conditions combine), `sorts`, `limit`, and `cursor`. Both return
+an object with `success`, `filters` (echoed back), `count`, `results` (array of raw
+Crustdata records — exact per-record fields aren't remapped), `next_cursor` and
+`total_count` (from Crustdata's response, when present), and `error` on failure.
 
 ---
 

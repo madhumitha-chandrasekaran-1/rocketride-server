@@ -27,19 +27,17 @@
 Crustdata tool node instance.
 
 Exposes ``company_search`` and ``person_search`` as @tool_function methods,
-giving an agent structured B2B discovery/enrichment data (firmographics,
-funding, headcount, verified people profiles) via Crustdata's filter-based
-search API.
+giving an agent structured B2B discovery data (firmographics, funding,
+headcount, verified people profiles) via Crustdata's filter-based search API.
 
-UNVERIFIED SURFACE: built from Crustdata's public documentation
-(https://docs.crustdata.com/), not against a live account (see #2129). The
-``filters`` shape (list of ``{filter_type, type, value}``) and the
-``/company/search`` / ``/person-docs/search`` endpoints are corroborated by
-multiple doc pages, but the exhaustive ``filter_type`` enum and the exact
-response envelope are not confirmed. Response parsing is deliberately
-defensive (``_extract_records`` tries several plausible top-level keys)
-rather than assuming one exact shape, so a real account is needed to
-tighten this rather than to make it merely work.
+VERIFIED SURFACE (see #2129): the endpoints, filter/condition schema, and
+cursor pagination here are read directly from Crustdata's own versioned API
+reference (docs.crustdata.com/company-docs/search/reference,
+docs.crustdata.com/person-docs/search/reference, x-api-version 2025-11-01) --
+not paraphrased from marketing pages. What remains unverified is everything
+that reference doesn't enumerate: the full searchable-field list per entity,
+and whether a given API key's plan includes the "live"/real-time variants
+Crustdata also advertises. No live account has exercised this end-to-end.
 """
 
 from __future__ import annotations
@@ -61,40 +59,85 @@ from .IGlobal import IGlobal
 
 CRUSTDATA_BASE_URL = 'https://api.crustdata.com'
 COMPANY_SEARCH_URL = f'{CRUSTDATA_BASE_URL}/company/search'
-PERSON_SEARCH_URL = f'{CRUSTDATA_BASE_URL}/person-docs/search'
+PERSON_SEARCH_URL = f'{CRUSTDATA_BASE_URL}/person/search'
 
 # Every endpoint requires this version pin (docs.crustdata.com); /screener/*
 # and /data_lab/* are documented as legacy predecessors of this versioned API.
 CRUSTDATA_API_VERSION = '2025-11-01'
 
-# Top-level keys a search response's record list has been observed or
-# documented under. Tried in order; the first present list wins.
-_RECORD_LIST_KEYS = ('results', 'data', 'companies', 'people', 'profiles')
+# Per Crustdata's reference, limit is 1-1000 (default 20 server-side; this
+# node's own default comes from node config, see IGlobal.default_limit).
+_MAX_LIMIT = 1000
+
+# The record-list key each endpoint's response uses, per the reference pages.
+_COMPANY_RECORDS_KEY = 'companies'
+_PERSON_RECORDS_KEY = 'profiles'
+
+_CONDITION_SCHEMA = {
+    'type': 'object',
+    'required': ['field', 'type', 'value'],
+    'properties': {
+        'field': {
+            'type': 'string',
+            'description': (
+                "The dotted field path to filter on, e.g. 'basic_info.primary_domain' (company), "
+                "'experience.employment_details.current.title' (person), 'locations.country'. "
+                "See Crustdata's field reference for the full searchable list per entity."
+            ),
+        },
+        'type': {
+            'type': 'string',
+            'enum': [
+                '=',
+                '!=',
+                '<',
+                '=<',
+                '>',
+                '=>',
+                'in',
+                'not_in',
+                'is_null',
+                'is_not_null',
+                '(.)',
+                '[.]',
+                'geo_distance',
+                'geo_exclude',
+            ],
+            'description': (
+                "The filter operator. '(.)' is fuzzy/contains match, '[.]' is exact list membership, "
+                "'geo_distance'/'geo_exclude' take a {location, distance, unit} object as value. "
+                "Use '=<'/'=>' rather than '<='/'>='."
+            ),
+        },
+        'value': {
+            'description': 'The value to match: a scalar, array, or (for geo_distance) an object.',
+        },
+    },
+}
 
 _FILTERS_SCHEMA = {
     'type': 'array',
     'minItems': 1,
+    'items': _CONDITION_SCHEMA,
+    'description': (
+        'One or more filter conditions. Multiple conditions are combined per "match" (default: all must hold).'
+    ),
+}
+
+_SORTS_SCHEMA = {
+    'type': 'array',
     'items': {
         'type': 'object',
-        'required': ['filter_type', 'type', 'value'],
+        'required': ['field', 'order'],
         'properties': {
-            'filter_type': {
-                'type': 'string',
-                'description': (
-                    "The Crustdata field to filter on, e.g. 'CURRENT_COMPANY', 'CURRENT_TITLE', "
-                    "'REGION', 'INDUSTRY', 'HEADCOUNT' (see Crustdata's filter reference for the full list)."
-                ),
-            },
-            'type': {
-                'type': 'string',
-                'description': "The filter operator, e.g. 'in', 'not in', '=', 'range'.",
-            },
-            'value': {
-                'description': 'The filter value: a string, number, or array of strings depending on filter_type/type.',
-            },
+            'field': {'type': 'string'},
+            'order': {'type': 'string', 'enum': ['asc', 'desc']},
         },
     },
-    'description': 'One or more Crustdata search filters, passed through verbatim to the API.',
+    'description': (
+        'Optional sort order. Strongly recommended whenever paginating with "cursor": '
+        'changing sort order between pages invalidates the cursor.'
+    ),
 }
 
 _OUTPUT_SCHEMA = {
@@ -104,9 +147,38 @@ _OUTPUT_SCHEMA = {
         'filters': {'type': 'array'},
         'count': {'type': 'integer'},
         'results': {'type': 'array', 'items': {'type': 'object'}},
+        'total_count': {'type': ['integer', 'null']},
+        'next_cursor': {'type': ['string', 'null']},
         'error': {'type': 'string'},
     },
 }
+
+
+def _input_schema() -> Dict[str, Any]:
+    return {
+        'type': 'object',
+        'required': ['filters'],
+        'properties': {
+            'filters': _FILTERS_SCHEMA,
+            'match': {
+                'type': 'string',
+                'enum': ['and', 'or', 'all_of'],
+                'description': "How multiple filter conditions combine. Defaults to 'and'.",
+            },
+            'sorts': _SORTS_SCHEMA,
+            'limit': {
+                'type': 'integer',
+                'description': f'Maximum number of results to return (1-{_MAX_LIMIT}). Defaults to the node config value.',
+            },
+            'cursor': {
+                'type': 'string',
+                'description': (
+                    "Pagination cursor from a previous call's next_cursor. Omit for the first page. "
+                    'Keep filters/sorts identical across pages or the cursor is invalidated.'
+                ),
+            },
+        },
+    }
 
 
 class IInstance(IInstanceBase):
@@ -115,21 +187,7 @@ class IInstance(IInstanceBase):
     IGlobal: IGlobal
 
     @tool_function(
-        input_schema={
-            'type': 'object',
-            'required': ['filters'],
-            'properties': {
-                'filters': _FILTERS_SCHEMA,
-                'limit': {
-                    'type': 'integer',
-                    'description': 'Maximum number of results to return. Defaults to the node config value.',
-                },
-                'page': {
-                    'type': 'integer',
-                    'description': '1-based page number for pagination. Defaults to 1.',
-                },
-            },
-        },
+        input_schema=_input_schema(),
         output_schema=_OUTPUT_SCHEMA,
         description=(
             'Search Crustdata for companies matching one or more filters (industry, region, headcount, '
@@ -140,24 +198,10 @@ class IInstance(IInstanceBase):
     )
     def company_search(self, args):
         """Search Crustdata's company index by filter criteria."""
-        return self._search(args, url=COMPANY_SEARCH_URL, tool_name='company_search')
+        return self._search(args, url=COMPANY_SEARCH_URL, records_key=_COMPANY_RECORDS_KEY, tool_name='company_search')
 
     @tool_function(
-        input_schema={
-            'type': 'object',
-            'required': ['filters'],
-            'properties': {
-                'filters': _FILTERS_SCHEMA,
-                'limit': {
-                    'type': 'integer',
-                    'description': 'Maximum number of results to return. Defaults to the node config value.',
-                },
-                'page': {
-                    'type': 'integer',
-                    'description': '1-based page number for pagination. Defaults to 1.',
-                },
-            },
-        },
+        input_schema=_input_schema(),
         output_schema=_OUTPUT_SCHEMA,
         description=(
             'Search Crustdata for people matching one or more filters (current company, current title, '
@@ -167,17 +211,17 @@ class IInstance(IInstanceBase):
     )
     def person_search(self, args):
         """Search Crustdata's people index by filter criteria."""
-        return self._search(args, url=PERSON_SEARCH_URL, tool_name='person_search')
+        return self._search(args, url=PERSON_SEARCH_URL, records_key=_PERSON_RECORDS_KEY, tool_name='person_search')
 
     # -------------------------------------------------------------------
     # Shared request path
     # -------------------------------------------------------------------
 
-    def _search(self, args: Dict[str, Any], *, url: str, tool_name: str) -> Dict[str, Any]:
+    def _search(self, args: Dict[str, Any], *, url: str, records_key: str, tool_name: str) -> Dict[str, Any]:
         args = normalize_tool_input(args, tool_name=tool_name)
 
-        filters = args.get('filters')
-        if not isinstance(filters, list) or not filters:
+        conditions = args.get('filters')
+        if not isinstance(conditions, list) or not conditions:
             return {
                 'success': False,
                 'filters': [],
@@ -190,27 +234,47 @@ class IInstance(IInstanceBase):
         limit = args.get('limit', cfg.default_limit)
         if isinstance(limit, bool) or not isinstance(limit, int):
             limit = cfg.default_limit
-        limit = max(1, min(100, limit))
+        limit = max(1, min(_MAX_LIMIT, limit))
 
-        page = args.get('page', 1)
-        if isinstance(page, bool) or not isinstance(page, int) or page < 1:
-            page = 1
+        match = args.get('match')
+        if match not in ('and', 'or', 'all_of'):
+            match = 'and'
 
-        payload: Dict[str, Any] = {'filters': filters, 'limit': limit, 'page': page}
+        # Crustdata's schema: a single bare condition, or {op, conditions: [...]} for
+        # more than one. Always sending the group form is simpler and equally valid.
+        payload: Dict[str, Any] = {
+            'filters': {'op': match, 'conditions': conditions},
+            'limit': limit,
+        }
+
+        sorts = args.get('sorts')
+        if isinstance(sorts, list) and sorts:
+            payload['sorts'] = sorts
+
+        cursor = args.get('cursor')
+        if isinstance(cursor, str) and cursor:
+            payload['cursor'] = cursor
+
         headers = _crustdata_headers(cfg.apikey)
 
         try:
             response = _request_with_retry(url=url, headers=headers, payload=payload)
         except RuntimeError as exc:
-            return {'success': False, 'filters': filters, 'count': 0, 'results': [], 'error': str(exc)}
+            return {'success': False, 'filters': conditions, 'count': 0, 'results': [], 'error': str(exc)}
 
-        records = _extract_records(response)
-        return {
+        records = _extract_records(response, records_key)
+        out: Dict[str, Any] = {
             'success': True,
-            'filters': filters,
+            'filters': conditions,
             'count': len(records),
             'results': records,
         }
+        if isinstance(response, dict):
+            if 'next_cursor' in response:
+                out['next_cursor'] = response.get('next_cursor')
+            if 'total_count' in response:
+                out['total_count'] = response.get('total_count')
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -227,21 +291,21 @@ def _crustdata_headers(apikey: str) -> Dict[str, str]:
     }
 
 
-def _extract_records(body: Any) -> List[Dict[str, Any]]:
-    """Best-effort extraction of the record list from a search response body.
+def _extract_records(body: Any, records_key: str) -> List[Dict[str, Any]]:
+    """Extract the record list from a search response body.
 
-    The exact response envelope is unverified (see module docstring), so this
-    tries several plausible top-level keys in order rather than assuming one.
-    A bare top-level list is also accepted. Non-dict items are dropped rather
-    than raised on, matching the defensive pattern used elsewhere for
-    upstream payloads whose exact shape isn't guaranteed (see tool_tavily's
-    ``_shape_results``).
+    ``records_key`` is the verified top-level key for the endpoint that was
+    called ('companies' or 'profiles', per Crustdata's reference pages) and is
+    tried first; a small set of other plausible keys is tried after it as a
+    resilience fallback, since only the documented shape — not every edge
+    case (e.g. an error body, or a future field rename) — has been confirmed.
+    Non-dict items are dropped rather than raised on.
     """
     if isinstance(body, list):
         return [item for item in body if isinstance(item, dict)]
     if not isinstance(body, dict):
         return []
-    for key in _RECORD_LIST_KEYS:
+    for key in (records_key, 'results', 'data'):
         value = body.get(key)
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]

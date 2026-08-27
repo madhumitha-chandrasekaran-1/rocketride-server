@@ -18,8 +18,8 @@
 	// Required:
 	//		Capabilities are flags that change the behavior of the underlying engine.
 	//		"experimental" marks this node as not yet production-ready — the request
-	//		and response shapes here are built from Crustdata's public documentation,
-	//		not verified against a live account (see issue #2129).
+	//		and response shapes here are read from Crustdata's versioned API reference,
+	//		but no live account has exercised it end-to-end (see issue #2129).
 	//
 	"capabilities": ["invoke", "experimental"],
 	//
@@ -88,10 +88,10 @@
 		"tool_crustdata.defaultLimit": {
 			"type": "integer",
 			"title": "Default Result Limit",
-			"description": "Default maximum number of results per search (1-100)",
+			"description": "Default maximum number of results per search (1-1000)",
 			"default": 10,
 			"minimum": 1,
-			"maximum": 100
+			"maximum": 1000
 		}
 	},
 	//

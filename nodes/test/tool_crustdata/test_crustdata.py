@@ -93,6 +93,7 @@ def _scoped_stubs() -> Iterator[None]:
 
 
 with _scoped_stubs():
+    from tool_crustdata.IGlobal import _coerce_limit
     from tool_crustdata.IInstance import (
         COMPANY_SEARCH_URL,
         CRUSTDATA_API_VERSION,
@@ -133,36 +134,72 @@ def _instance(apikey='test-key', default_limit=10):
     return inst
 
 
-_A_FILTER = [{'filter_type': 'CURRENT_COMPANY', 'type': 'in', 'value': ['Acme Corp']}]
+_A_CONDITION = {'field': 'basic_info.primary_domain', 'type': '=', 'value': 'acme.com'}
 
 
 # ---------------------------------------------------------------------------
-# _extract_records — the defensive response-envelope parsing
+# _extract_records — response-envelope parsing
 # ---------------------------------------------------------------------------
 
 
 class TestExtractRecords:
-    @pytest.mark.parametrize('key', ['results', 'data', 'companies', 'people', 'profiles'])
-    def test_finds_the_record_list_under_any_known_key(self, key):
-        body = {key: [{'name': 'Acme'}, {'name': 'Globex'}]}
-        assert _extract_records(body) == [{'name': 'Acme'}, {'name': 'Globex'}]
+    def test_finds_the_verified_key_for_the_endpoint_that_was_called(self):
+        assert _extract_records({'companies': [{'name': 'Acme'}]}, 'companies') == [{'name': 'Acme'}]
+        assert _extract_records({'profiles': [{'name': 'Jane'}]}, 'profiles') == [{'name': 'Jane'}]
+
+    @pytest.mark.parametrize('key', ['results', 'data'])
+    def test_falls_back_to_other_plausible_keys(self, key):
+        body = {key: [{'name': 'Acme'}]}
+        assert _extract_records(body, 'companies') == [{'name': 'Acme'}]
+
+    def test_verified_key_wins_over_fallback_keys(self):
+        body = {'results': [{'name': 'wrong'}], 'companies': [{'name': 'right'}]}
+        assert _extract_records(body, 'companies') == [{'name': 'right'}]
 
     def test_accepts_a_bare_top_level_list(self):
-        assert _extract_records([{'name': 'Acme'}]) == [{'name': 'Acme'}]
+        assert _extract_records([{'name': 'Acme'}], 'companies') == [{'name': 'Acme'}]
 
     def test_drops_non_dict_items_rather_than_raising(self):
-        body = {'results': ['oops', None, 42, {'name': 'Acme'}]}
-        assert _extract_records(body) == [{'name': 'Acme'}]
+        body = {'companies': ['oops', None, 42, {'name': 'Acme'}]}
+        assert _extract_records(body, 'companies') == [{'name': 'Acme'}]
 
     def test_unrecognized_shape_returns_empty_not_an_error(self):
-        assert _extract_records({'totally_unexpected_key': [{'name': 'Acme'}]}) == []
-        assert _extract_records('not even a dict or list') == []
-        assert _extract_records(None) == []
+        assert _extract_records({'totally_unexpected_key': [{'name': 'Acme'}]}, 'companies') == []
+        assert _extract_records('not even a dict or list', 'companies') == []
+        assert _extract_records(None, 'companies') == []
 
-    def test_first_matching_key_wins(self):
-        """Results is checked before data, per _RECORD_LIST_KEYS order."""
-        body = {'data': [{'name': 'wrong'}], 'results': [{'name': 'right'}]}
-        assert _extract_records(body) == [{'name': 'right'}]
+
+# ---------------------------------------------------------------------------
+# _coerce_limit — defaultLimit must degrade gracefully, not raise out of beginGlobal
+# ---------------------------------------------------------------------------
+
+
+class TestCoerceLimit:
+    def test_valid_int_within_range_passes_through(self):
+        assert _coerce_limit(50) == 50
+
+    def test_none_falls_back_to_the_default(self):
+        assert _coerce_limit(None) == 10
+        assert _coerce_limit(None, default=25) == 25
+
+    def test_empty_string_falls_back_to_the_default(self):
+        """A hand-edited .pipe or SDK caller can send '' where the UI would send an int."""
+        assert _coerce_limit('') == 10
+
+    def test_non_numeric_string_falls_back_to_the_default(self):
+        assert _coerce_limit('not-a-number') == 10
+
+    def test_bool_does_not_become_1_or_0(self):
+        assert _coerce_limit(True) == 10
+        assert _coerce_limit(False) == 10
+
+    def test_numeric_string_is_coerced(self):
+        assert _coerce_limit('42') == 42
+
+    def test_out_of_range_values_are_clamped(self):
+        assert _coerce_limit(5000) == 1000
+        assert _coerce_limit(0) == 1
+        assert _coerce_limit(-5) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -204,55 +241,113 @@ class TestSearchValidation:
 
 class TestSearchRequests:
     @patch('tool_crustdata.IInstance.requests.post')
-    def test_company_search_hits_the_company_endpoint_with_the_given_filters(self, mock_post):
-        mock_post.return_value = _resp(200, json_data={'results': [{'name': 'Acme'}]})
+    def test_company_search_hits_the_company_endpoint_and_wraps_filters_in_the_op_group(self, mock_post):
+        mock_post.return_value = _resp(200, json_data={'companies': [{'name': 'Acme'}], 'total_count': 1})
         inst = _instance()
 
-        out = inst.company_search({'filters': _A_FILTER})
+        out = inst.company_search({'filters': [_A_CONDITION]})
 
-        assert out == {'success': True, 'filters': _A_FILTER, 'count': 1, 'results': [{'name': 'Acme'}]}
+        assert out == {
+            'success': True,
+            'filters': [_A_CONDITION],
+            'count': 1,
+            'results': [{'name': 'Acme'}],
+            'total_count': 1,
+        }
         call_kwargs = mock_post.call_args
         assert call_kwargs.args[0] == COMPANY_SEARCH_URL
-        assert call_kwargs.kwargs['json'] == {'filters': _A_FILTER, 'limit': 10, 'page': 1}
+        assert call_kwargs.kwargs['json'] == {
+            'filters': {'op': 'and', 'conditions': [_A_CONDITION]},
+            'limit': 10,
+        }
         assert call_kwargs.kwargs['headers']['authorization'] == 'Bearer test-key'
 
     @patch('tool_crustdata.IInstance.requests.post')
     def test_person_search_hits_the_person_endpoint(self, mock_post):
-        mock_post.return_value = _resp(200, json_data={'data': []})
+        mock_post.return_value = _resp(200, json_data={'profiles': []})
         inst = _instance()
 
-        out = inst.person_search({'filters': _A_FILTER})
+        out = inst.person_search({'filters': [_A_CONDITION]})
 
         assert out['success'] is True
         assert mock_post.call_args.args[0] == PERSON_SEARCH_URL
 
     @patch('tool_crustdata.IInstance.requests.post')
-    def test_limit_is_clamped_to_the_documented_range(self, mock_post):
-        mock_post.return_value = _resp(200, json_data={'results': []})
+    def test_match_selects_the_op_and_defaults_to_and(self, mock_post):
+        mock_post.return_value = _resp(200, json_data={'companies': []})
         inst = _instance()
 
-        inst.company_search({'filters': _A_FILTER, 'limit': 5000})
-        assert mock_post.call_args.kwargs['json']['limit'] == 100
+        inst.company_search({'filters': [_A_CONDITION], 'match': 'or'})
+        assert mock_post.call_args.kwargs['json']['filters']['op'] == 'or'
 
-        inst.company_search({'filters': _A_FILTER, 'limit': 0})
+        inst.company_search({'filters': [_A_CONDITION], 'match': 'not-a-real-op'})
+        assert mock_post.call_args.kwargs['json']['filters']['op'] == 'and'
+
+    @patch('tool_crustdata.IInstance.requests.post')
+    def test_sorts_and_cursor_are_forwarded_when_provided(self, mock_post):
+        mock_post.return_value = _resp(200, json_data={'companies': []})
+        inst = _instance()
+
+        inst.company_search(
+            {
+                'filters': [_A_CONDITION],
+                'sorts': [{'field': 'crustdata_company_id', 'order': 'asc'}],
+                'cursor': 'abc123',
+            }
+        )
+
+        sent = mock_post.call_args.kwargs['json']
+        assert sent['sorts'] == [{'field': 'crustdata_company_id', 'order': 'asc'}]
+        assert sent['cursor'] == 'abc123'
+
+    @patch('tool_crustdata.IInstance.requests.post')
+    def test_cursor_and_sorts_are_omitted_when_not_provided(self, mock_post):
+        mock_post.return_value = _resp(200, json_data={'companies': []})
+        inst = _instance()
+
+        inst.company_search({'filters': [_A_CONDITION]})
+
+        sent = mock_post.call_args.kwargs['json']
+        assert 'cursor' not in sent
+        assert 'sorts' not in sent
+
+    @patch('tool_crustdata.IInstance.requests.post')
+    def test_next_cursor_is_surfaced_when_the_response_has_more_pages(self, mock_post):
+        mock_post.return_value = _resp(200, json_data={'companies': [], 'next_cursor': 'xyz789', 'total_count': 500})
+        inst = _instance()
+
+        out = inst.company_search({'filters': [_A_CONDITION]})
+
+        assert out['next_cursor'] == 'xyz789'
+        assert out['total_count'] == 500
+
+    @patch('tool_crustdata.IInstance.requests.post')
+    def test_limit_is_clamped_to_the_documented_range(self, mock_post):
+        mock_post.return_value = _resp(200, json_data={'companies': []})
+        inst = _instance()
+
+        inst.company_search({'filters': [_A_CONDITION], 'limit': 5000})
+        assert mock_post.call_args.kwargs['json']['limit'] == 1000
+
+        inst.company_search({'filters': [_A_CONDITION], 'limit': 0})
         assert mock_post.call_args.kwargs['json']['limit'] == 1
 
     @patch('tool_crustdata.IInstance.requests.post')
     def test_bool_limit_does_not_become_1_or_0(self, mock_post):
         """Bool is a subclass of int in Python; {'limit': True} must not silently become 1."""
-        mock_post.return_value = _resp(200, json_data={'results': []})
+        mock_post.return_value = _resp(200, json_data={'companies': []})
         inst = _instance(default_limit=25)
 
-        inst.company_search({'filters': _A_FILTER, 'limit': True})
+        inst.company_search({'filters': [_A_CONDITION], 'limit': True})
         assert mock_post.call_args.kwargs['json']['limit'] == 25
 
     @patch('tool_crustdata.IInstance.time.sleep', return_value=None)
     @patch('tool_crustdata.IInstance.requests.post')
     def test_retries_on_429_then_succeeds(self, mock_post, _sleep):
-        mock_post.side_effect = [_resp(429), _resp(200, json_data={'results': [{'name': 'Acme'}]})]
+        mock_post.side_effect = [_resp(429), _resp(200, json_data={'companies': [{'name': 'Acme'}]})]
         inst = _instance()
 
-        out = inst.company_search({'filters': _A_FILTER})
+        out = inst.company_search({'filters': [_A_CONDITION]})
 
         assert out['success'] is True
         assert mock_post.call_count == 2
@@ -263,17 +358,18 @@ class TestSearchRequests:
         mock_post.return_value = _resp(503)
         inst = _instance()
 
-        out = inst.company_search({'filters': _A_FILTER})
+        out = inst.company_search({'filters': [_A_CONDITION]})
 
         assert out['success'] is False
         assert mock_post.call_count == 4  # initial attempt + 3 retries
 
+    @patch('tool_crustdata.IInstance.time.sleep', return_value=None)
     @patch('tool_crustdata.IInstance.requests.post')
-    def test_timeout_is_reported_as_a_structured_error_not_raised(self, mock_post):
+    def test_timeout_is_reported_as_a_structured_error_not_raised(self, mock_post, _sleep):
         mock_post.side_effect = requests.exceptions.Timeout('timed out')
         inst = _instance()
 
-        out = inst.company_search({'filters': _A_FILTER})
+        out = inst.company_search({'filters': [_A_CONDITION]})
 
         assert out['success'] is False
         assert 'timed out' in out['error']
@@ -283,7 +379,7 @@ class TestSearchRequests:
         mock_post.side_effect = requests.exceptions.ConnectionError('dns failure')
         inst = _instance()
 
-        out = inst.person_search({'filters': _A_FILTER})
+        out = inst.person_search({'filters': [_A_CONDITION]})
 
         assert out['success'] is False
         assert out['results'] == []
