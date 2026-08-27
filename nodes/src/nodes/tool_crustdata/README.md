@@ -18,9 +18,13 @@ for companies; title, work history, education, and verified contact info for peo
 Filters are a list of `{field, type, value}` conditions (e.g. `{"field":
 "basic_info.primary_domain", "type": "=", "value": "acme.com"}`) — the node wraps them
 into Crustdata's `{"op": <match>, "conditions": [...]}` group form before sending, so
-callers just supply a flat list plus an optional `match` ("and"/"or"/"all_of", default
-"and"). This is a **search/discovery** tool (find records matching criteria), not a
-single-entity enrichment lookup by domain or email.
+callers just supply a flat list plus an optional `match` ("and"/"or", default "and").
+Company search's `op` enum only has those two values; person search's third value,
+`all_of`, is a specialized nested-array operator (all conditions on one employment
+or education path, matched across possibly-different array elements) rather than a
+generic combinator, and isn't exposed here. This is a **search/discovery** tool
+(find records matching criteria), not a single-entity enrichment lookup by domain
+or email.
 
 Pagination is cursor-based, per Crustdata's API: a response's `next_cursor` is passed
 back as `cursor` on the next call. Crustdata's docs note that changing `filters` or

@@ -284,6 +284,20 @@ class TestSearchRequests:
         assert mock_post.call_args.kwargs['json']['filters']['op'] == 'and'
 
     @patch('tool_crustdata.IInstance.requests.post')
+    def test_all_of_is_never_sent_as_the_top_level_op(self, mock_post):
+        """all_of is a person-search-only nested-array operator (constrained to one
+        employment/education field path, no negation, no further nesting) -- not a
+        generic combinator. Company search's op enum doesn't have it at all. Treat
+        it like any other invalid match value: fall back to 'and'.
+        """
+        mock_post.return_value = _resp(200, json_data={'companies': []})
+        inst = _instance()
+
+        inst.company_search({'filters': [_A_CONDITION], 'match': 'all_of'})
+
+        assert mock_post.call_args.kwargs['json']['filters']['op'] == 'and'
+
+    @patch('tool_crustdata.IInstance.requests.post')
     def test_sorts_and_cursor_are_forwarded_when_provided(self, mock_post):
         mock_post.return_value = _resp(200, json_data={'companies': []})
         inst = _instance()

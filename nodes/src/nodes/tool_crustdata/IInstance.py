@@ -162,7 +162,7 @@ def _input_schema() -> Dict[str, Any]:
             'filters': _FILTERS_SCHEMA,
             'match': {
                 'type': 'string',
-                'enum': ['and', 'or', 'all_of'],
+                'enum': ['and', 'or'],
                 'description': "How multiple filter conditions combine. Defaults to 'and'.",
             },
             'sorts': _SORTS_SCHEMA,
@@ -237,7 +237,12 @@ class IInstance(IInstanceBase):
         limit = max(1, min(_MAX_LIMIT, limit))
 
         match = args.get('match')
-        if match not in ('and', 'or', 'all_of'):
+        # 'and'/'or' only: company search's op enum has no third value, and person
+        # search's 'all_of' is not a generic combinator -- it's constrained to a
+        # single nested-array field path (employment, education, ...), rejects
+        # scalar fields, and can't hold negation or nest another all_of. None of
+        # that fits a flat "combine any conditions" match parameter.
+        if match not in ('and', 'or'):
             match = 'and'
 
         # Crustdata's schema: a single bare condition, or {op, conditions: [...]} for
