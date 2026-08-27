@@ -65,6 +65,12 @@ def _load_modules():
     ai_descriptor.descriptor_from_payload = Mock(return_value=None)
     sys.modules['ai.common.avi.descriptor'] = ai_descriptor
 
+    # The `from . import ...` / `from .X import Y` statements inside IGlobal.py
+    # and IInstance.py resolve their references at exec time, so the returned
+    # module objects stay fully usable for the rest of this file even after
+    # sys.modules is cleaned up below -- nothing here re-resolves through the
+    # cache later.
+    submodule_names = ('cloud_stt.deepgram_stt', 'cloud_stt.IGlobal', 'cloud_stt.IInstance')
     pkg = types.ModuleType('cloud_stt')
     pkg.__path__ = [str(_DIR)]
     sys.modules['cloud_stt'] = pkg
@@ -80,6 +86,9 @@ def _load_modules():
             sys.modules['cloud_stt.IInstance'],
         )
     finally:
+        sys.modules.pop('cloud_stt', None)
+        for name in submodule_names:
+            sys.modules.pop(name, None)
         for name, mod in _saved.items():
             if mod is None:
                 sys.modules.pop(name, None)
@@ -237,6 +246,33 @@ class TestClipBuffering:
 
         assert bytes(inst._buffer) == b'chunk-one-chunk-two'
         inst.instance.writeText.assert_not_called()
+
+    def test_write_within_the_cap_is_unaffected(self):
+        inst = _instance()
+        inst.writeAudio(_ii.AVI_ACTION.BEGIN, 'audio/wav', b'')
+
+        inst.writeAudio(_ii.AVI_ACTION.WRITE, 'audio/wav', b'x' * (_ii._MAX_BUFFER_BYTES - 1))
+
+        assert len(inst._buffer) == _ii._MAX_BUFFER_BYTES - 1
+
+    def test_write_exceeding_the_cap_clears_the_buffer_and_raises(self):
+        """An unbounded clip must fail loudly, not grow the buffer without limit."""
+        inst = _instance()
+        inst.writeAudio(_ii.AVI_ACTION.BEGIN, 'audio/wav', b'')
+        inst.writeAudio(_ii.AVI_ACTION.WRITE, 'audio/wav', b'x' * (_ii._MAX_BUFFER_BYTES - 10))
+
+        with pytest.raises(ValueError, match='exceeds the .* limit'):
+            inst.writeAudio(_ii.AVI_ACTION.WRITE, 'audio/wav', b'y' * 20)
+
+        assert bytes(inst._buffer) == b''
+        inst.IGlobal.transcribe.assert_not_called()
+
+    def test_a_single_write_larger_than_the_cap_raises_from_an_empty_buffer(self):
+        inst = _instance()
+        inst.writeAudio(_ii.AVI_ACTION.BEGIN, 'audio/wav', b'')
+
+        with pytest.raises(ValueError, match='exceeds the .* limit'):
+            inst.writeAudio(_ii.AVI_ACTION.WRITE, 'audio/wav', b'z' * (_ii._MAX_BUFFER_BYTES + 1))
 
     def test_end_transcribes_the_complete_buffer_and_writes_text(self):
         inst = _instance()

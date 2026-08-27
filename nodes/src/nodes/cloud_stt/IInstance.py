@@ -19,8 +19,21 @@ from ai.common.avi.descriptor import descriptor_from_payload
 
 from .IGlobal import IGlobal
 
+# Hard cap on one buffered clip. Cloud vendors take one request per clip (see
+# module docstring), so nothing here is chunked the way audio_transcribe's
+# local processing is -- an unbounded WRITE stream would grow this buffer
+# without limit, and briefly double it again at END's `bytes(self._buffer)`
+# copy. 200MB is generous for real dictation/call-length audio (multiple
+# hours of compressed audio) while still bounding worst-case memory per
+# stream instead of trusting the sender.
+_MAX_BUFFER_BYTES = 200 * 1024 * 1024
+
 
 class IInstance(IInstanceBase):
+    """Buffers one audio/video clip across BEGIN/WRITE/END and transcribes it
+    via the vendor IGlobal resolves, writing the result on the text lane.
+    """
+
     IGlobal: IGlobal
 
     def open(self, object: Entry):
@@ -30,6 +43,13 @@ class IInstance(IInstanceBase):
         self._descriptor = None
 
     def _consume_media(self, action: int, mimeType: str, buffer: bytes):
+        """Route one BEGIN/WRITE/END step of an audio or video stream.
+
+        BEGIN parses and discards the stream descriptor (see the module
+        docstring) and resets the buffer. WRITE appends bytes, enforcing
+        ``_MAX_BUFFER_BYTES``. END sends the complete buffered clip to the
+        vendor and writes the resulting transcript.
+        """
         if action == AVI_ACTION.BEGIN:
             self._descriptor = descriptor_from_payload(buffer)
             self._buffer = bytearray()
@@ -37,6 +57,10 @@ class IInstance(IInstanceBase):
             return
 
         if buffer:
+            if len(self._buffer) + len(buffer) > _MAX_BUFFER_BYTES:
+                self._buffer = bytearray()
+                warning(f'Cloud STT: clip exceeded the {_MAX_BUFFER_BYTES}-byte buffer cap; failing this stream')
+                raise ValueError(f'Cloud STT: clip exceeds the {_MAX_BUFFER_BYTES}-byte limit')
             self._buffer.extend(buffer)
         if mimeType:
             self._mime_type = mimeType
@@ -54,7 +78,9 @@ class IInstance(IInstanceBase):
             self.instance.writeText(text)
 
     def writeAudio(self, action: int, mimeType: str, buffer: bytes):
+        """Consume one BEGIN/WRITE/END step of an audio stream."""
         self._consume_media(action, mimeType, buffer)
 
     def writeVideo(self, action: int, mimeType: str, buffer: bytes):
+        """Consume one BEGIN/WRITE/END step of a video stream (its audio track, as bytes)."""
         self._consume_media(action, mimeType, buffer)

@@ -54,8 +54,12 @@ directly) instead of the profile branch that silently drops them (see #2070).
 
 One request per clip, no chunking — the whole buffered clip is sent to
 Deepgram at `END`. A very long recording is one large request rather than a
-stream of partial transcripts; there is no size cap enforced here today (see
-Deepgram's own documented limits for pre-recorded audio).
+stream of partial transcripts. A clip is capped at 200MB buffered
+(`_MAX_BUFFER_BYTES` in `IInstance.py`) — exceeding it discards the buffer
+and fails the stream with a clear error rather than growing unbounded, since
+nothing here chunks the way `audio_transcribe`'s local processing does. See
+Deepgram's own documented limits for pre-recorded audio for what it accepts
+past that.
 
 ## Code layout
 
