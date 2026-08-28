@@ -663,14 +663,14 @@ class TestNotionGetPage:
             'in_trash': True,
         }
 
-    def test_is_archived_also_counts_as_in_trash(self, monkeypatch):
-        mock_request = Mock(return_value={'properties': {}, 'url': '', 'is_archived': True})
+    def test_missing_in_trash_defaults_to_false(self, monkeypatch):
+        mock_request = Mock(return_value={'properties': {}, 'url': ''})
         monkeypatch.setattr(_ii.notion_client, 'request', mock_request)
         inst = _instance()
 
         out = inst.notion_get_page({'page_id': 'p1'})
 
-        assert out['in_trash'] is True
+        assert out['in_trash'] is False
 
 
 # ---------------------------------------------------------------------------

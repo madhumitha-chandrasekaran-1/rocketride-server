@@ -272,7 +272,7 @@ class IInstance(IInstanceBase):
             return {
                 'properties': resp.get('properties', {}),
                 'url': resp.get('url', ''),
-                'in_trash': bool(resp.get('in_trash') or resp.get('is_archived')),
+                'in_trash': bool(resp.get('in_trash')),
             }
 
         return _run(op)
