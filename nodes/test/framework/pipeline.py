@@ -138,6 +138,7 @@ _LLM_MOCK_CREDENTIALS = {
     'tool_tavily': {'apikey': 'mock-tavily-placeholder-for-tests'},
     'tool_deepl': {'apikey': 'mock-deepl-placeholder-for-tests'},
     'tool_slack': {'token': 'xoxb-mock-placeholder-for-tests'},
+    'tool_notion': {'apikey': 'secret_mock-notion-placeholder-for-tests'},
 }
 
 
