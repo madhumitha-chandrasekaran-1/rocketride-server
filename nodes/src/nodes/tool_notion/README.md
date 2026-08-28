@@ -23,11 +23,24 @@ text per block, indenting nested blocks (a toggle's contents, a nested bullet) u
 configurable depth. Block types with no text of their own (dividers, images, tables,
 ...) are silently skipped rather than guessed at.
 
-Implemented with the **requests** library, no Notion SDK is used. Requests time out
-after 30 seconds and are retried up to 3 times with exponential backoff (2 s base
+A new page's title property key must match its parent's schema — a database's title
+column isn't always called "Name" (e.g. it might be "Task"). `notion_create_page`
+looks the real key up from the data source's schema rather than guessing, when the
+parent is a database row and the caller didn't already supply one in `properties`.
+
+Implemented with the **requests** library, no Notion SDK is used. Read requests time
+out after 30 seconds and are retried up to 3 times with exponential backoff (2 s base
 delay) on connection errors, rate limits (HTTP 429, honoring Notion's `Retry-After`
-header when present), and server errors (5xx). Failures are returned to the agent as a
-structured `{"success": false, "error": ...}` result rather than raised.
+header when present), and server errors (5xx). Writes (`notion_create_page`,
+`notion_update_page`, `notion_append_content`) are never retried: Notion has no
+idempotency key for these endpoints, so retrying a mutation whose response was lost to
+a connection error risks creating a duplicate page or duplicate content. Failures are
+returned to the agent as a structured `{"success": false, "error": ...}` result rather
+than raised.
+
+`notion_append_content` batches into groups of at most 100 blocks per request and
+rejects (rather than silently truncating) any line over 2000 characters, matching
+Notion's documented request limits.
 
 The node has no pipeline lanes (`lanes` is `{}`). Only agent runtimes reach it, through
 the `invoke` capability.
@@ -55,7 +68,7 @@ Notion — sharing a page also shares everything nested under it.
 | `notion_get_page` | Get a page's properties (its database row values, if any) and metadata — not its body content. |
 | `notion_get_page_content` | Get a page's body as flattened plain text. |
 | `notion_create_page` | Create a page, either as a sub-page under another page or as a new row in a database, with optional initial body text. |
-| `notion_update_page` | Update a page's property values and/or archive/unarchive it. |
+| `notion_update_page` | Update a page's property values and/or move it to/from trash. |
 | `notion_append_content` | Append text to the end of a page's (or block's) body, one paragraph per line. |
 
 All eight return `success` plus tool-specific fields, and `error` on failure — see each

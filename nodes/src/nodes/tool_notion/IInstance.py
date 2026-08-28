@@ -251,7 +251,7 @@ class IInstance(IInstanceBase):
                 'success': {'type': 'boolean'},
                 'properties': {'type': 'object'},
                 'url': {'type': 'string'},
-                'archived': {'type': 'boolean'},
+                'in_trash': {'type': 'boolean'},
                 **_ERROR_SCHEMA,
             },
         },
@@ -272,7 +272,7 @@ class IInstance(IInstanceBase):
             return {
                 'properties': resp.get('properties', {}),
                 'url': resp.get('url', ''),
-                'archived': bool(resp.get('archived') or resp.get('in_trash')),
+                'in_trash': bool(resp.get('in_trash') or resp.get('is_archived')),
             }
 
         return _run(op)
@@ -367,16 +367,23 @@ class IInstance(IInstanceBase):
         title = (args.get('title') or '').strip()
 
         def op():
+            # Notion's parent.type value is 'page_id'/'data_source_id' (the key
+            # name it's paired with), not the bare 'page'/'data_source'.
             parent_key = 'page_id' if parent_type == 'page' else 'data_source_id'
-            body: Dict[str, Any] = {'parent': {'type': parent_type, parent_key: parent_id}}
+            body: Dict[str, Any] = {'parent': {'type': parent_key, parent_key: parent_id}}
 
             properties: Dict[str, Any] = dict(args.get('properties') or {})
             if title:
-                title_key = 'title' if parent_type == 'page' else 'Name'
                 # A caller-supplied `properties` may already name the title
-                # field explicitly (e.g. a database whose title column isn't
-                # called "Name"); only default it in when absent.
-                if not any(isinstance(v, dict) and 'title' in v for v in properties.values()):
+                # field explicitly; only default it in when absent.
+                has_title_prop = any(isinstance(v, dict) and 'title' in v for v in properties.values())
+                if not has_title_prop:
+                    if parent_type == 'page':
+                        title_key = 'title'
+                    else:
+                        # A database's title property is per-schema (e.g. "Task"
+                        # instead of "Name"), so look it up rather than guess.
+                        title_key = notion_client.get_title_property_name(parent_id, api_key=self.IGlobal.apikey)
                     properties[title_key] = notion_client.title_property(title)
             body['properties'] = properties
 
@@ -384,7 +391,10 @@ class IInstance(IInstanceBase):
             if content:
                 body['children'] = notion_client.paragraph_blocks(content)
 
-            resp = notion_client.request('POST', '/pages', api_key=self.IGlobal.apikey, json_body=body)
+            # Page creation is a non-idempotent mutation: a connection error or
+            # 5xx of unknown outcome must not be blindly retried and risk
+            # creating a duplicate page.
+            resp = notion_client.request('POST', '/pages', api_key=self.IGlobal.apikey, json_body=body, max_retries=0)
             return {'page_id': resp.get('id', ''), 'url': resp.get('url', '')}
 
         return _run(op)
@@ -399,33 +409,36 @@ class IInstance(IInstanceBase):
                     'type': 'object',
                     'description': "Property values to update, in Notion's own property-value shape.",
                 },
-                'archived': {'type': 'boolean', 'description': 'Archive (true) or unarchive (false) the page.'},
+                'in_trash': {'type': 'boolean', 'description': 'Move to trash (true) or restore (false) the page.'},
             },
         },
         output_schema={
             'type': 'object',
             'properties': {'success': {'type': 'boolean'}, 'page_id': {'type': 'string'}, **_ERROR_SCHEMA},
         },
-        description="Update a page's property values and/or its archived status.",
+        description="Update a page's property values and/or trash/restore it.",
     )
     def notion_update_page(self, args):
-        """Update a page's properties and/or archived status."""
+        """Update a page's properties and/or trashed status."""
         args = normalize_tool_input(args, tool_name='notion_update_page')
         page_id = (args.get('page_id') or '').strip()
         if not page_id:
             return {'success': False, 'error': 'notion_update_page: "page_id" is required'}
         properties = args.get('properties')
-        archived = args.get('archived')
-        if not properties and archived is None:
-            return {'success': False, 'error': 'notion_update_page: pass "properties" and/or "archived"'}
+        in_trash = args.get('in_trash')
+        if not properties and in_trash is None:
+            return {'success': False, 'error': 'notion_update_page: pass "properties" and/or "in_trash"'}
 
         def op():
             body: Dict[str, Any] = {}
             if properties:
                 body['properties'] = properties
-            if isinstance(archived, bool):
-                body['archived'] = archived
-            notion_client.request('PATCH', f'/pages/{page_id}', api_key=self.IGlobal.apikey, json_body=body)
+            if isinstance(in_trash, bool):
+                body['in_trash'] = in_trash
+            # A page update is a non-idempotent mutation -- see notion_create_page.
+            notion_client.request(
+                'PATCH', f'/pages/{page_id}', api_key=self.IGlobal.apikey, json_body=body, max_retries=0
+            )
             return {'page_id': page_id}
 
         return _run(op)
@@ -455,9 +468,7 @@ class IInstance(IInstanceBase):
 
         def op():
             blocks = notion_client.paragraph_blocks(text)
-            notion_client.request(
-                'PATCH', f'/blocks/{block_id}/children', api_key=self.IGlobal.apikey, json_body={'children': blocks}
-            )
-            return {'appended': len(blocks)}
+            appended = notion_client.append_block_children(block_id, blocks, api_key=self.IGlobal.apikey)
+            return {'appended': appended}
 
         return _run(op)

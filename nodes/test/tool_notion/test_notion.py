@@ -282,6 +282,27 @@ class TestResolveDataSourceId:
             _nc.resolve_data_source_id('db-1', api_key='k')
 
 
+class TestGetTitlePropertyName:
+    def test_finds_the_property_whose_type_is_title(self, mock_requests):
+        mock_requests.request.return_value = _resp(
+            200,
+            json_data={
+                'properties': {
+                    'Status': {'type': 'select'},
+                    'Task': {'type': 'title'},
+                }
+            },
+        )
+        out = _nc.get_title_property_name('ds-1', api_key='k')
+        assert out == 'Task'
+        assert mock_requests.request.call_args.args == ('GET', 'https://api.notion.com/v1/data_sources/ds-1')
+
+    def test_raises_when_no_title_property_exists(self, mock_requests):
+        mock_requests.request.return_value = _resp(200, json_data={'properties': {'Status': {'type': 'select'}}})
+        with pytest.raises(_nc.NotionAPIError, match='no title property'):
+            _nc.get_title_property_name('ds-1', api_key='k')
+
+
 # ---------------------------------------------------------------------------
 # notion_client block-tree flattening
 # ---------------------------------------------------------------------------
@@ -429,6 +450,41 @@ class TestParagraphBlocks:
 
     def test_blank_only_text_yields_no_blocks(self):
         assert _nc.paragraph_blocks('   \n\n  ') == []
+
+    def test_line_at_the_limit_is_accepted(self):
+        line = 'x' * _nc.MAX_RICH_TEXT_LENGTH
+        blocks = _nc.paragraph_blocks(line)
+        assert len(blocks) == 1
+
+    def test_line_over_the_limit_raises(self):
+        line = 'x' * (_nc.MAX_RICH_TEXT_LENGTH + 1)
+        with pytest.raises(_nc.NotionAPIError, match='rich-text limit'):
+            _nc.paragraph_blocks(line)
+
+
+class TestAppendBlockChildren:
+    def _blocks(self, n):
+        return _nc.paragraph_blocks('\n'.join(f'line {i}' for i in range(n)))
+
+    def test_single_batch_for_under_the_limit(self, mock_requests):
+        mock_requests.request.return_value = _resp(200, json_data={})
+        appended = _nc.append_block_children('b1', self._blocks(5), api_key='k')
+        assert appended == 5
+        assert mock_requests.request.call_count == 1
+
+    def test_batches_into_groups_of_at_most_100(self, mock_requests):
+        mock_requests.request.return_value = _resp(200, json_data={})
+        appended = _nc.append_block_children('b1', self._blocks(250), api_key='k')
+        assert appended == 250
+        assert mock_requests.request.call_count == 3
+        sizes = [len(call.kwargs['json']['children']) for call in mock_requests.request.call_args_list]
+        assert sizes == [100, 100, 50]
+
+    def test_each_batch_is_sent_without_retries(self, mock_requests):
+        mock_requests.request.return_value = _resp(503)
+        with pytest.raises(_nc.NotionAPIError):
+            _nc.append_block_children('b1', self._blocks(1), api_key='k')
+        assert mock_requests.request.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -591,9 +647,9 @@ class TestNotionGetPage:
         assert out['success'] is False
         mock_request.assert_not_called()
 
-    def test_returns_properties_url_and_archived(self, monkeypatch):
+    def test_returns_properties_url_and_in_trash(self, monkeypatch):
         mock_request = Mock(
-            return_value={'properties': {'Name': {'title': []}}, 'url': 'https://notion.so/p1', 'archived': True}
+            return_value={'properties': {'Name': {'title': []}}, 'url': 'https://notion.so/p1', 'in_trash': True}
         )
         monkeypatch.setattr(_ii.notion_client, 'request', mock_request)
         inst = _instance()
@@ -604,17 +660,17 @@ class TestNotionGetPage:
             'success': True,
             'properties': {'Name': {'title': []}},
             'url': 'https://notion.so/p1',
-            'archived': True,
+            'in_trash': True,
         }
 
-    def test_in_trash_also_counts_as_archived(self, monkeypatch):
-        mock_request = Mock(return_value={'properties': {}, 'url': '', 'in_trash': True})
+    def test_is_archived_also_counts_as_in_trash(self, monkeypatch):
+        mock_request = Mock(return_value={'properties': {}, 'url': '', 'is_archived': True})
         monkeypatch.setattr(_ii.notion_client, 'request', mock_request)
         inst = _instance()
 
         out = inst.notion_get_page({'page_id': 'p1'})
 
-        assert out['archived'] is True
+        assert out['in_trash'] is True
 
 
 # ---------------------------------------------------------------------------
@@ -669,9 +725,11 @@ class TestNotionCreatePage:
         assert inst.notion_create_page({'parent_id': 'x', 'parent_type': 'bogus'})['success'] is False
         mock_request.assert_not_called()
 
-    def test_page_parent_uses_page_id_key_and_title_property(self, monkeypatch):
+    def test_page_parent_uses_page_id_type_and_title_property(self, monkeypatch):
         mock_request = Mock(return_value={'id': 'new-page', 'url': 'https://notion.so/new-page'})
+        mock_title_lookup = Mock()
         monkeypatch.setattr(_ii.notion_client, 'request', mock_request)
+        monkeypatch.setattr(_ii.notion_client, 'get_title_property_name', mock_title_lookup)
         inst = _instance()
 
         out = inst.notion_create_page({'parent_id': 'parent-1', 'parent_type': 'page', 'title': 'New Page'})
@@ -679,24 +737,43 @@ class TestNotionCreatePage:
         assert out == {'success': True, 'page_id': 'new-page', 'url': 'https://notion.so/new-page'}
         call = mock_request.call_args
         assert call.args == ('POST', '/pages')
+        assert call.kwargs['max_retries'] == 0
         body = call.kwargs['json_body']
-        assert body['parent'] == {'type': 'page', 'page_id': 'parent-1'}
+        assert body['parent'] == {'type': 'page_id', 'page_id': 'parent-1'}
         assert body['properties']['title'] == _nc.title_property('New Page')
+        # A page parent's title key is always literally 'title' -- no schema lookup needed.
+        mock_title_lookup.assert_not_called()
 
-    def test_data_source_parent_uses_data_source_id_key_and_name_property(self, monkeypatch):
+    def test_data_source_parent_uses_data_source_id_type_and_resolved_title_property(self, monkeypatch):
         mock_request = Mock(return_value={'id': 'row-1', 'url': ''})
         monkeypatch.setattr(_ii.notion_client, 'request', mock_request)
+        monkeypatch.setattr(_ii.notion_client, 'get_title_property_name', Mock(return_value='Task'))
         inst = _instance()
 
         inst.notion_create_page({'parent_id': 'ds-1', 'parent_type': 'data_source', 'title': 'New Row'})
 
         body = mock_request.call_args.kwargs['json_body']
-        assert body['parent'] == {'type': 'data_source', 'data_source_id': 'ds-1'}
-        assert body['properties']['Name'] == _nc.title_property('New Row')
+        assert body['parent'] == {'type': 'data_source_id', 'data_source_id': 'ds-1'}
+        assert body['properties']['Task'] == _nc.title_property('New Row')
+
+    def test_title_property_lookup_uses_the_data_sources_own_schema(self, monkeypatch):
+        """A database's title column isn't always called "Name" -- the key must
+        come from the data source's schema, not a guessed default.
+        """
+        mock_lookup = Mock(return_value='Task')
+        monkeypatch.setattr(_ii.notion_client, 'request', Mock(return_value={'id': 'row-1', 'url': ''}))
+        monkeypatch.setattr(_ii.notion_client, 'get_title_property_name', mock_lookup)
+        inst = _instance()
+
+        inst.notion_create_page({'parent_id': 'ds-1', 'parent_type': 'data_source', 'title': 'New Row'})
+
+        mock_lookup.assert_called_once_with('ds-1', api_key='test-key')
 
     def test_explicit_title_property_in_properties_is_not_overridden(self, monkeypatch):
         mock_request = Mock(return_value={'id': 'row-1', 'url': ''})
+        mock_title_lookup = Mock()
         monkeypatch.setattr(_ii.notion_client, 'request', mock_request)
+        monkeypatch.setattr(_ii.notion_client, 'get_title_property_name', mock_title_lookup)
         inst = _instance()
 
         custom_title = {'title': [{'type': 'text', 'text': {'content': 'Custom'}}]}
@@ -711,7 +788,8 @@ class TestNotionCreatePage:
 
         body = mock_request.call_args.kwargs['json_body']
         assert body['properties'] == {'Task Name': custom_title}
-        assert 'Name' not in body['properties']
+        # No schema lookup needed -- the caller already supplied the title property.
+        mock_title_lookup.assert_not_called()
 
     def test_content_is_converted_to_paragraph_blocks(self, monkeypatch):
         mock_request = Mock(return_value={'id': 'p1', 'url': ''})
@@ -746,12 +824,12 @@ class TestNotionUpdatePage:
         monkeypatch.setattr(_ii.notion_client, 'request', mock_request)
         inst = _instance()
 
-        out = inst.notion_update_page({'archived': True})
+        out = inst.notion_update_page({'in_trash': True})
 
         assert out['success'] is False
         mock_request.assert_not_called()
 
-    def test_neither_properties_nor_archived_is_rejected(self, monkeypatch):
+    def test_neither_properties_nor_in_trash_is_rejected(self, monkeypatch):
         mock_request = Mock()
         monkeypatch.setattr(_ii.notion_client, 'request', mock_request)
         inst = _instance()
@@ -761,28 +839,29 @@ class TestNotionUpdatePage:
         assert out['success'] is False
         mock_request.assert_not_called()
 
-    def test_updates_properties_and_archived(self, monkeypatch):
+    def test_updates_properties_and_in_trash(self, monkeypatch):
         mock_request = Mock(return_value={})
         monkeypatch.setattr(_ii.notion_client, 'request', mock_request)
         inst = _instance()
 
         out = inst.notion_update_page(
-            {'page_id': 'p1', 'properties': {'Status': {'select': {'name': 'Done'}}}, 'archived': True}
+            {'page_id': 'p1', 'properties': {'Status': {'select': {'name': 'Done'}}}, 'in_trash': True}
         )
 
         assert out == {'success': True, 'page_id': 'p1'}
         call = mock_request.call_args
         assert call.args == ('PATCH', '/pages/p1')
-        assert call.kwargs['json_body'] == {'properties': {'Status': {'select': {'name': 'Done'}}}, 'archived': True}
+        assert call.kwargs['json_body'] == {'properties': {'Status': {'select': {'name': 'Done'}}}, 'in_trash': True}
+        assert call.kwargs['max_retries'] == 0
 
-    def test_archived_false_is_sent_not_omitted(self, monkeypatch):
+    def test_in_trash_false_is_sent_not_omitted(self, monkeypatch):
         mock_request = Mock(return_value={})
         monkeypatch.setattr(_ii.notion_client, 'request', mock_request)
         inst = _instance()
 
-        inst.notion_update_page({'page_id': 'p1', 'archived': False})
+        inst.notion_update_page({'page_id': 'p1', 'in_trash': False})
 
-        assert mock_request.call_args.kwargs['json_body'] == {'archived': False}
+        assert mock_request.call_args.kwargs['json_body'] == {'in_trash': False}
 
 
 # ---------------------------------------------------------------------------
@@ -792,30 +871,33 @@ class TestNotionUpdatePage:
 
 class TestNotionAppendContent:
     def test_missing_block_id_or_text_is_rejected(self, monkeypatch):
-        mock_request = Mock()
-        monkeypatch.setattr(_ii.notion_client, 'request', mock_request)
+        mock_append = Mock()
+        monkeypatch.setattr(_ii.notion_client, 'append_block_children', mock_append)
         inst = _instance()
 
         assert inst.notion_append_content({'text': 'x'})['success'] is False
         assert inst.notion_append_content({'block_id': 'b1'})['success'] is False
         assert inst.notion_append_content({'block_id': 'b1', 'text': '   '})['success'] is False
-        mock_request.assert_not_called()
+        mock_append.assert_not_called()
 
     def test_appends_one_block_per_line_and_reports_the_count(self, monkeypatch):
-        mock_request = Mock(return_value={})
-        monkeypatch.setattr(_ii.notion_client, 'request', mock_request)
+        mock_append = Mock(return_value=3)
+        monkeypatch.setattr(_ii.notion_client, 'append_block_children', mock_append)
         inst = _instance()
 
         out = inst.notion_append_content({'block_id': 'b1', 'text': 'first\nsecond\nthird'})
 
         assert out == {'success': True, 'appended': 3}
-        call = mock_request.call_args
-        assert call.args == ('PATCH', '/blocks/b1/children')
-        assert len(call.kwargs['json_body']['children']) == 3
+        call = mock_append.call_args
+        assert call.args[0] == 'b1'
+        assert len(call.args[1]) == 3
+        assert call.kwargs['api_key'] == 'test-key'
 
     def test_error_is_wrapped(self, monkeypatch):
         monkeypatch.setattr(
-            _ii.notion_client, 'request', Mock(side_effect=_nc.NotionAPIError(404, 'not_found', 'block missing'))
+            _ii.notion_client,
+            'append_block_children',
+            Mock(side_effect=_nc.NotionAPIError(404, 'not_found', 'block missing')),
         )
         inst = _instance()
 
@@ -823,6 +905,16 @@ class TestNotionAppendContent:
 
         assert out['success'] is False
         assert 'block missing' in out['error']
+
+    def test_line_over_the_rich_text_limit_is_rejected_before_any_request(self, monkeypatch):
+        mock_append = Mock()
+        monkeypatch.setattr(_ii.notion_client, 'append_block_children', mock_append)
+        inst = _instance()
+
+        out = inst.notion_append_content({'block_id': 'b1', 'text': 'x' * 2001})
+
+        assert out['success'] is False
+        mock_append.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

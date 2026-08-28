@@ -154,6 +154,20 @@ def resolve_data_source_id(database_id: str, *, api_key: str, data_source_id: Op
     return sources[0]['id']
 
 
+def get_title_property_name(data_source_id: str, *, api_key: str) -> str:
+    """Return the name of a data source's title property (there is exactly one).
+
+    Property keys are per-database (e.g. a "Task" column instead of "Name"),
+    so a page created as a database row must use whichever key the schema
+    actually defines, not a guessed default.
+    """
+    ds = request('GET', f'/data_sources/{data_source_id}', api_key=api_key)
+    for name, prop in (ds.get('properties') or {}).items():
+        if isinstance(prop, dict) and prop.get('type') == 'title':
+            return name
+    raise NotionAPIError(0, 'no_title_property', f'data source {data_source_id} has no title property')
+
+
 # ---------------------------------------------------------------------------
 # Block tree -> plain text (page content)
 # ---------------------------------------------------------------------------
@@ -230,12 +244,30 @@ def title_property(text: str) -> Dict[str, Any]:
     return {'title': [{'type': 'text', 'text': {'content': text}}]}
 
 
+# Notion's documented request limits (developers.notion.com/reference/request-limits):
+# a rich_text `text.content` string tops out at 2000 characters, and a single
+# PATCH /blocks/{id}/children call accepts at most 100 block children.
+MAX_RICH_TEXT_LENGTH = 2000
+MAX_BLOCKS_PER_APPEND = 100
+
+
 def paragraph_blocks(text: str) -> List[Dict[str, Any]]:
-    """One paragraph block per non-empty line of ``text``."""
+    """One paragraph block per non-empty line of ``text``.
+
+    Raises ``NotionAPIError`` if any line exceeds Notion's per-rich-text
+    character limit -- callers should shorten the line rather than have it
+    silently truncated or rejected by the API with a less specific error.
+    """
     blocks = []
     for line in text.split('\n'):
         if not line.strip():
             continue
+        if len(line) > MAX_RICH_TEXT_LENGTH:
+            raise NotionAPIError(
+                0,
+                'line_too_long',
+                f'a line is {len(line)} characters, over Notion’s {MAX_RICH_TEXT_LENGTH}-character rich-text limit',
+            )
         blocks.append(
             {
                 'object': 'block',
@@ -244,3 +276,19 @@ def paragraph_blocks(text: str) -> List[Dict[str, Any]]:
             }
         )
     return blocks
+
+
+def append_block_children(block_id: str, blocks: List[Dict[str, Any]], *, api_key: str) -> int:
+    """Append ``blocks`` to a page/block's children, batching into Notion's
+    100-blocks-per-request limit. Returns the number of blocks appended.
+
+    Each batch is sent with ``max_retries=0``: appending is a non-idempotent
+    mutation, so a connection error or 5xx of unknown outcome must not be
+    blindly retried and risk appending the same blocks twice.
+    """
+    appended = 0
+    for start in range(0, len(blocks), MAX_BLOCKS_PER_APPEND):
+        batch = blocks[start : start + MAX_BLOCKS_PER_APPEND]
+        request('PATCH', f'/blocks/{block_id}/children', api_key=api_key, json_body={'children': batch}, max_retries=0)
+        appended += len(batch)
+    return appended
