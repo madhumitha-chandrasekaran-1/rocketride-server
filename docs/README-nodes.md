@@ -172,6 +172,7 @@ channel; they have no data lanes and **bind to an agent** (see
 | `tool_xtrace_memory`| Long-term shared agent memory, backed by xTrace Memory Manager   |
 | `tool_mem0`         | Long-term shared agent memory, backed by the hosted Mem0 Platform |
 | `tool_gohighlevel`  | GoHighLevel (LeadConnector) v2 sub-account operations: contacts, opportunities, conversations, calendars |
+| `tool_crustdata`    | Crustdata company/people search: firmographics, funding, headcount, verified profiles |
 
 ### Embeddings
 

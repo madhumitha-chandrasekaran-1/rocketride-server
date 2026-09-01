@@ -42,16 +42,15 @@ Crustdata also advertises. No live account has exercised this end-to-end.
 
 from __future__ import annotations
 
-import time
 from typing import Any, Dict, List
 
 import requests
 
-from rocketlib import IInstanceBase, tool_function, debug
+from rocketlib import IInstanceBase, tool_function
 
-from ai.common.utils import normalize_tool_input
+from ai.common.utils import normalize_tool_input, post_with_retry
 
-from .IGlobal import IGlobal
+from .IGlobal import IGlobal, _coerce_limit
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -231,10 +230,8 @@ class IInstance(IInstanceBase):
             }
 
         cfg = self.IGlobal
-        limit = args.get('limit', cfg.default_limit)
-        if isinstance(limit, bool) or not isinstance(limit, int):
-            limit = cfg.default_limit
-        limit = max(1, min(_MAX_LIMIT, limit))
+        raw_limit = args.get('limit')
+        limit = cfg.default_limit if raw_limit is None else _coerce_limit(raw_limit, default=cfg.default_limit)
 
         match = args.get('match')
         # 'and'/'or' only: company search's op enum has no third value, and person
@@ -263,9 +260,28 @@ class IInstance(IInstanceBase):
         headers = _crustdata_headers(cfg.apikey)
 
         try:
-            response = _request_with_retry(url=url, headers=headers, payload=payload)
-        except RuntimeError as exc:
-            return {'success': False, 'filters': conditions, 'count': 0, 'results': [], 'error': str(exc)}
+            resp = post_with_retry(url, headers=headers, json=payload)
+            response = resp.json()
+        except requests.exceptions.InvalidJSONError:
+            # resp.json() raises JSONDecodeError, a subclass of both InvalidJSONError
+            # and RequestException — catch it before the generic handler.
+            return {
+                'success': False,
+                'filters': conditions,
+                'count': 0,
+                'results': [],
+                'error': 'Crustdata returned a non-JSON response body',
+            }
+        except requests.RequestException as exc:
+            status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            detail = f' (HTTP {status})' if status else ''
+            return {
+                'success': False,
+                'filters': conditions,
+                'count': 0,
+                'results': [],
+                'error': f'Crustdata search request failed{detail}: {type(exc).__name__}',
+            }
 
         records = _extract_records(response, records_key)
         out: Dict[str, Any] = {
@@ -315,54 +331,3 @@ def _extract_records(body: Any, records_key: str) -> List[Dict[str, Any]]:
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
     return []
-
-
-def _request_with_retry(
-    *,
-    url: str,
-    headers: Dict[str, str],
-    payload: Dict[str, Any],
-    max_retries: int = 3,
-    base_delay: float = 2.0,
-) -> Any:
-    """Execute an HTTP POST to the Crustdata API with retry on transient errors."""
-    for attempt in range(max_retries + 1):
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=30)
-
-            if resp.status_code == 429:
-                if attempt < max_retries:
-                    delay = base_delay * (2**attempt)
-                    debug(f'Crustdata rate limit hit (429), retrying in {delay}s (attempt {attempt + 1}/{max_retries})')
-                    time.sleep(delay)
-                    continue
-                resp.raise_for_status()
-
-            if 500 <= resp.status_code < 600:
-                if attempt < max_retries:
-                    delay = base_delay * (2**attempt)
-                    debug(
-                        f'Crustdata server error ({resp.status_code}), retrying in {delay}s '
-                        f'(attempt {attempt + 1}/{max_retries})'
-                    )
-                    time.sleep(delay)
-                    continue
-                resp.raise_for_status()
-
-            resp.raise_for_status()
-            return resp.json()
-
-        except requests.exceptions.Timeout:
-            if attempt < max_retries:
-                delay = base_delay * (2**attempt)
-                debug(f'Crustdata request timeout, retrying in {delay}s (attempt {attempt + 1}/{max_retries})')
-                time.sleep(delay)
-                continue
-            raise RuntimeError('Crustdata search: request timed out after all retries') from None
-
-        except requests.RequestException as exc:
-            status = getattr(getattr(exc, 'response', None), 'status_code', None)
-            detail = f' (HTTP {status})' if status else ''
-            raise RuntimeError(f'Crustdata search request failed{detail}: {type(exc).__name__}') from None
-
-    raise RuntimeError('Crustdata search: max retries exceeded')

@@ -11,12 +11,16 @@ Unit tests for tool_crustdata (no network, no engine runtime).
 Bootstrap mirrors test_pipedrive.py: inject lightweight stubs for the engine
 runtime modules ONLY if absent, import the module under test, then drop the
 stubs so they never leak into a shared pytest session. `requests` is real —
-only its `.post` call is mocked per test, so the retry/error-mapping logic in
-`_request_with_retry` runs against real exception types.
+only its `.post` call is mocked per test, so the retry/error-mapping logic
+runs against real exception types. `post_with_retry` is loaded directly from
+its source file (bypassing the stubbed `ai`/`ai.common` packages) so the node
+exercises the same tenacity-based retry policy production uses, rather than a
+re-implementation of it.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 import types
 from collections.abc import Iterator
@@ -29,7 +33,23 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'src' / 'nodes'))
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_HTTP_RETRY_PATH = _REPO_ROOT / 'packages' / 'ai' / 'src' / 'ai' / 'common' / 'utils' / 'http_retry.py'
+
 _STUB_MODULE_NAMES = ('rocketlib', 'ai', 'ai.common', 'ai.common.config', 'ai.common.utils')
+
+
+def _load_real_post_with_retry():
+    """Load the real ``post_with_retry`` straight from its source file.
+
+    Independent of the ``ai``/``ai.common`` package stubs below — http_retry.py
+    only imports ``requests`` and ``tenacity``, both real — so retry/backoff
+    behavior under test is the actual production implementation.
+    """
+    spec = importlib.util.spec_from_file_location('_real_ai_common_utils_http_retry', _HTTP_RETRY_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.post_with_retry
 
 
 def _install_stubs() -> None:
@@ -75,6 +95,7 @@ def _install_stubs() -> None:
         return value if isinstance(value, dict) else {}
 
     mod_utils.normalize_tool_input = normalize_tool_input
+    mod_utils.post_with_retry = _load_real_post_with_retry()
     sys.modules['ai.common.utils'] = mod_utils
 
 
@@ -355,7 +376,7 @@ class TestSearchRequests:
         inst.company_search({'filters': [_A_CONDITION], 'limit': True})
         assert mock_post.call_args.kwargs['json']['limit'] == 25
 
-    @patch('tool_crustdata.IInstance.time.sleep', return_value=None)
+    @patch('tenacity.nap.sleep', return_value=None)
     @patch('tool_crustdata.IInstance.requests.post')
     def test_retries_on_429_then_succeeds(self, mock_post, _sleep):
         mock_post.side_effect = [_resp(429), _resp(200, json_data={'companies': [{'name': 'Acme'}]})]
@@ -366,7 +387,7 @@ class TestSearchRequests:
         assert out['success'] is True
         assert mock_post.call_count == 2
 
-    @patch('tool_crustdata.IInstance.time.sleep', return_value=None)
+    @patch('tenacity.nap.sleep', return_value=None)
     @patch('tool_crustdata.IInstance.requests.post')
     def test_retries_on_5xx_then_gives_up_after_max_retries(self, mock_post, _sleep):
         mock_post.return_value = _resp(503)
@@ -375,9 +396,9 @@ class TestSearchRequests:
         out = inst.company_search({'filters': [_A_CONDITION]})
 
         assert out['success'] is False
-        assert mock_post.call_count == 4  # initial attempt + 3 retries
+        assert mock_post.call_count == 4  # initial attempt + 3 retries (post_with_retry's max_attempts=4)
 
-    @patch('tool_crustdata.IInstance.time.sleep', return_value=None)
+    @patch('tenacity.nap.sleep', return_value=None)
     @patch('tool_crustdata.IInstance.requests.post')
     def test_timeout_is_reported_as_a_structured_error_not_raised(self, mock_post, _sleep):
         mock_post.side_effect = requests.exceptions.Timeout('timed out')
@@ -386,10 +407,16 @@ class TestSearchRequests:
         out = inst.company_search({'filters': [_A_CONDITION]})
 
         assert out['success'] is False
-        assert 'timed out' in out['error']
+        assert 'Timeout' in out['error']
+        assert mock_post.call_count == 4
 
+    @patch('tenacity.nap.sleep', return_value=None)
     @patch('tool_crustdata.IInstance.requests.post')
-    def test_connection_error_is_reported_as_a_structured_error(self, mock_post):
+    def test_connection_error_is_reported_as_a_structured_error(self, mock_post, _sleep):
+        """A connection error is transient transport failure, not a hard fail on the
+        first attempt — post_with_retry must retry it like it retries Timeout, so this
+        asserts the retry actually happened rather than asserting immediate failure.
+        """
         mock_post.side_effect = requests.exceptions.ConnectionError('dns failure')
         inst = _instance()
 
@@ -397,3 +424,4 @@ class TestSearchRequests:
 
         assert out['success'] is False
         assert out['results'] == []
+        assert mock_post.call_count == 4
