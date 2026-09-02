@@ -376,7 +376,7 @@ class TestSearchRequests:
         inst.company_search({'filters': [_A_CONDITION], 'limit': True})
         assert mock_post.call_args.kwargs['json']['limit'] == 25
 
-    @patch('tenacity.nap.sleep', return_value=None)
+    @patch('tenacity.nap.time.sleep', return_value=None)
     @patch('tool_crustdata.IInstance.requests.post')
     def test_retries_on_429_then_succeeds(self, mock_post, _sleep):
         mock_post.side_effect = [_resp(429), _resp(200, json_data={'companies': [{'name': 'Acme'}]})]
@@ -387,7 +387,7 @@ class TestSearchRequests:
         assert out['success'] is True
         assert mock_post.call_count == 2
 
-    @patch('tenacity.nap.sleep', return_value=None)
+    @patch('tenacity.nap.time.sleep', return_value=None)
     @patch('tool_crustdata.IInstance.requests.post')
     def test_retries_on_5xx_then_gives_up_after_max_retries(self, mock_post, _sleep):
         mock_post.return_value = _resp(503)
@@ -398,7 +398,7 @@ class TestSearchRequests:
         assert out['success'] is False
         assert mock_post.call_count == 4  # initial attempt + 3 retries (post_with_retry's max_attempts=4)
 
-    @patch('tenacity.nap.sleep', return_value=None)
+    @patch('tenacity.nap.time.sleep', return_value=None)
     @patch('tool_crustdata.IInstance.requests.post')
     def test_timeout_is_reported_as_a_structured_error_not_raised(self, mock_post, _sleep):
         mock_post.side_effect = requests.exceptions.Timeout('timed out')
@@ -410,7 +410,7 @@ class TestSearchRequests:
         assert 'Timeout' in out['error']
         assert mock_post.call_count == 4
 
-    @patch('tenacity.nap.sleep', return_value=None)
+    @patch('tenacity.nap.time.sleep', return_value=None)
     @patch('tool_crustdata.IInstance.requests.post')
     def test_connection_error_is_reported_as_a_structured_error(self, mock_post, _sleep):
         """A connection error is transient transport failure, not a hard fail on the
