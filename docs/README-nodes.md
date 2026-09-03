@@ -173,6 +173,7 @@ channel; they have no data lanes and **bind to an agent** (see
 | `tool_mem0`         | Long-term shared agent memory, backed by the hosted Mem0 Platform |
 | `tool_gohighlevel`  | GoHighLevel (LeadConnector) v2 sub-account operations: contacts, opportunities, conversations, calendars |
 | `tool_crustdata`    | Crustdata company/people search: firmographics, funding, headcount, verified profiles |
+| `tool_notion`       | Notion workspace access: search, read pages and database rows, create/update content |
 
 ### Embeddings
 
@@ -289,6 +290,7 @@ channel; they have no data lanes and **bind to an agent** (see
 | Service         | Data flow (in → out)                                  | Description                                  |
 | --------------- | ----------------------------------------------------- | -------------------------------------------- |
 | `guardrails`    | questions, answers, documents → answers, documents, questions | Input/output safety guardrails       |
+| `authoritative_overlay` | answers, text → answers                         | SEC EDGAR period-scoped number cross-check (abstain on mismatch) |
 | `rerank_cohere` | questions → answers, documents                        | Cohere Rerank for retrieval quality          |
 | `search_exa`    | questions → answers, text                             | Direct Exa web search (non-tool)             |
 
