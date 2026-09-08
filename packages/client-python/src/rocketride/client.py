@@ -203,25 +203,29 @@ class RocketRideClient(
             # Use the provided env dictionary; copy it so the caller's dict is not mutated
             self._env = dict(env)
 
-        # If we didn't get the URI, look at the env. If not there, check
-        # whether a local engine (started by the VS Code extension) left
-        # behind a connection discovery hint -- see _connection_discovery.py.
-        # Only consulted as a last resort, so an explicit uri/env value
-        # always wins and nothing changes for anyone not relying on it.
-        discovery_info = None
+        # If we didn't get the URI, look at the env. An explicit
+        # ROCKETRIDE_URI -- even '' -- must behave exactly as it did before
+        # discovery existed (an explicit empty string reaches
+        # _get_websocket_uri() below and raises there), so check for the key's
+        # *presence* rather than truthiness: only a genuinely-unset env falls
+        # through to checking whether a local engine (started by the VS Code
+        # extension) left behind a connection discovery hint -- see
+        # _connection_discovery.py. Discovery is only ever consulted as this
+        # last resort, so an explicit uri/env value always wins and nothing
+        # changes for anyone not relying on it.
         if not uri:
-            uri = self._env.get('ROCKETRIDE_URI', '')
-            if not uri:
+            if 'ROCKETRIDE_URI' in self._env:
+                uri = self._env['ROCKETRIDE_URI']
+            else:
                 discovery_info = read_connection_discovery()
                 uri = discovery_info['uri'] if discovery_info else CONST_DEFAULT_WEB_CLOUD
 
         # If no explicit auth credential was given, fall back to the environment
-        # variable, then (only when the URI itself came from the discovery hint
-        # above) that same hint's API key.
+        # variable. Discovery never supplies a credential (see
+        # _connection_discovery.py) -- only ROCKETRIDE_APIKEY or an explicit
+        # auth ever sets it.
         if not auth:
             auth = self._env.get('ROCKETRIDE_APIKEY', None)
-            if not auth and discovery_info:
-                auth = discovery_info['apiKey'] or None
 
         # Normalize the URI into a fully-formed WebSocket address
         from .mixins.connection import ConnectionMixin

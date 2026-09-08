@@ -435,27 +435,33 @@ export class EngineLocal extends EngineBackend {
 	 * and non-fatal: a write failure here must never break an otherwise-
 	 * successful engine start.
 	 *
-	 * apiKey is hardcoded to the local-mode default ('MYAPIKEY', the same
-	 * fallback `ConnectionManager.connect()` uses when no explicit apiKey is
-	 * configured) rather than plumbed through from the caller: EngineLocal
-	 * only knows the port it started on, not which connection-group config
-	 * ultimately drives the client's actual auth. This file is a discovery
-	 * convenience, not an auth source of truth -- a dev who customized their
-	 * local API key away from the default already knows to configure it
-	 * explicitly on the consuming side too.
+	 * No credential lives in this file (see #1851 review: an earlier version
+	 * carried a hardcoded `apiKey`, which was removed -- a credential-shaped
+	 * field that never actually varies just invites a reader to trust it as
+	 * one). `mode: 0o600` is defence-in-depth so only this OS user can read
+	 * it, since it still influences which host a reader's *real* credential
+	 * gets sent to (see `isLoopbackDiscoveryUri` in connectionDiscovery.ts for
+	 * why a reader must independently constrain the host, not trust this file
+	 * blindly). `mode` is a POSIX permission bit and a no-op on Windows.
 	 */
 	private writeConnectionDiscovery(pid: number): void {
 		if (this.actualPort === undefined) return;
+		const filePath = connectionDiscoveryPath(this.installer.dir);
 		try {
 			fs.writeFileSync(
-				connectionDiscoveryPath(this.installer.dir),
+				filePath,
 				serializeConnectionDiscovery({
 					uri: `http://localhost:${this.actualPort}`,
-					apiKey: 'MYAPIKEY',
 					pid,
 					updatedAt: new Date().toISOString(),
 				}),
+				{ mode: 0o600 },
 			);
+			// `mode` above only applies when writeFileSync actually creates the
+			// file; an install upgrading from a version that wrote it 0644 would
+			// otherwise keep truncating-and-rewriting that same looser mode
+			// forever. chmod unconditionally, best-effort.
+			fs.chmodSync(filePath, 0o600);
 		} catch {
 			/* best-effort */
 		}

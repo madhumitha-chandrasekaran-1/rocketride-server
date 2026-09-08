@@ -54,6 +54,15 @@
  * be unit-tested standalone with `node:test` (see connectionDiscovery.test.ts).
  * The actual filesystem read/write lives in EngineLocal, which already uses
  * `fs` synchronously for its PID files.
+ *
+ * Canonical schema, kept in sync by hand across this file and the read side
+ * (`packages/client-python/src/rocketride/_connection_discovery.py`; there is
+ * no TypeScript reader yet) -- see `ConnectionDiscoveryInfo` below for the
+ * fields and `parseConnectionDiscovery`/`isLoopbackDiscoveryUri` for exactly
+ * what a reader must validate before trusting a parsed file. There used to be
+ * a third field, `apiKey`, hardcoded to the local-mode default; it was
+ * removed (see #1851 review) because a credential-shaped field that is never
+ * actually a credential invites the next reader to trust it as one.
  */
 
 import * as path from 'path';
@@ -61,8 +70,6 @@ import * as path from 'path';
 /** Shape of the connection discovery file's contents. */
 export interface ConnectionDiscoveryInfo {
 	uri: string;
-	/** Local mode always uses the fixed default; see `writeConnectionDiscovery`. */
-	apiKey: string;
 	/** PID of the writer, so a stale entry left behind by a crash (no clean
 	 * `stop()`) can be told apart from a live one. */
 	pid: number;
@@ -85,11 +92,51 @@ export function serializeConnectionDiscovery(info: ConnectionDiscoveryInfo): str
 	return JSON.stringify(info, null, 2) + '\n';
 }
 
+/** True for an absolute `http(s)://` URI -- the only shape this file is ever
+ * meant to carry (a bare host:port or a `ws(s)://` URI is not a mistake this
+ * writer makes, so reject it rather than guess at normalizing it). */
+function isAbsoluteHttpUri(uri: string): boolean {
+	if (!uri) return false;
+	try {
+		return new URL(uri).protocol === 'http:' || new URL(uri).protocol === 'https:';
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * True when `uri`'s host is loopback (`localhost`, `127.0.0.1`, or `::1`).
+ *
+ * Discovery only ever means "a local engine on this machine" -- the writer
+ * never emits anything else. A reader MUST call this (or the equivalent
+ * check on its own side) before adopting a discovered URI or any credential
+ * alongside it: without it, a discovery file naming an attacker-controlled
+ * host would redirect a client's real API key there. `new URL().hostname`
+ * canonicalizes alternate IPv4/IPv6 loopback spellings (octal/decimal
+ * octets, `::0:1`, etc.) to their standard form, so a plain equality check
+ * against the three spellings below is not fooled by those.
+ */
+export function isLoopbackDiscoveryUri(uri: string): boolean {
+	let hostname: string;
+	try {
+		hostname = new URL(uri).hostname;
+	} catch {
+		return false;
+	}
+	return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
+}
+
 /**
  * Parses the discovery file's text, returning `null` for anything that isn't
- * a well-formed `ConnectionDiscoveryInfo` (missing file, invalid JSON, or a
- * shape from some future/incompatible version) rather than throwing --
- * callers on the read side should treat this purely as an optional hint.
+ * a well-formed, structurally valid `ConnectionDiscoveryInfo` (missing file,
+ * invalid JSON, a shape from some future/incompatible version, a non-http(s)
+ * URI, or a non-positive/non-integer pid) rather than throwing -- callers on
+ * the read side should treat this purely as an optional hint.
+ *
+ * This only checks that the file is well-formed. It does NOT check that the
+ * URI is loopback -- callers must additionally call
+ * `isLoopbackDiscoveryUri()` before trusting the result for anything
+ * connection-relevant (see its doc comment).
  */
 export function parseConnectionDiscovery(text: string): ConnectionDiscoveryInfo | null {
 	let data: unknown;
@@ -98,19 +145,15 @@ export function parseConnectionDiscovery(text: string): ConnectionDiscoveryInfo 
 	} catch {
 		return null;
 	}
-	if (
-		!data ||
-		typeof data !== 'object' ||
-		typeof (data as Record<string, unknown>).uri !== 'string' ||
-		typeof (data as Record<string, unknown>).pid !== 'number'
-	) {
-		return null;
-	}
+	if (!data || typeof data !== 'object') return null;
 	const record = data as Record<string, unknown>;
+	const uri = record.uri;
+	const pid = record.pid;
+	if (typeof uri !== 'string' || !isAbsoluteHttpUri(uri)) return null;
+	if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return null;
 	return {
-		uri: record.uri as string,
-		apiKey: typeof record.apiKey === 'string' ? record.apiKey : '',
-		pid: record.pid as number,
+		uri,
+		pid,
 		updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : '',
 	};
 }

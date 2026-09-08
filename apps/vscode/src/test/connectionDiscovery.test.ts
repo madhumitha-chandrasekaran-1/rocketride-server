@@ -27,13 +27,13 @@ import {
 	connectionDiscoveryPath,
 	parseConnectionDiscovery,
 	serializeConnectionDiscovery,
+	isLoopbackDiscoveryUri,
 	CONNECTION_DISCOVERY_FILENAME,
 	type ConnectionDiscoveryInfo,
 } from '../engine/local/connectionDiscovery';
 
 const INFO: ConnectionDiscoveryInfo = {
 	uri: 'http://localhost:54321',
-	apiKey: 'MYAPIKEY',
 	pid: 4242,
 	updatedAt: '2026-08-05T12:00:00.000Z',
 };
@@ -60,9 +60,14 @@ test('serialized output is valid, human-readable JSON ending in a newline', () =
 	assert.deepEqual(JSON.parse(text), INFO);
 });
 
-test('defaults a missing apiKey to an empty string on parse', () => {
+test('defaults a missing updatedAt to an empty string on parse', () => {
 	const parsed = parseConnectionDiscovery(JSON.stringify({ uri: INFO.uri, pid: INFO.pid }));
-	assert.deepEqual(parsed, { uri: INFO.uri, apiKey: '', pid: INFO.pid, updatedAt: '' });
+	assert.deepEqual(parsed, { uri: INFO.uri, pid: INFO.pid, updatedAt: '' });
+});
+
+test('a serialized file no longer carries an apiKey field', () => {
+	const text = serializeConnectionDiscovery(INFO);
+	assert.equal(JSON.parse(text).apiKey, undefined);
 });
 
 // --- parseConnectionDiscovery must never throw on bad input ------------------
@@ -78,14 +83,21 @@ test('returns null for JSON that is not an object', () => {
 	assert.equal(parseConnectionDiscovery('[]'), null);
 });
 
-test('returns null when uri is missing or not a string', () => {
+test('returns null when uri is missing, not a string, or not an absolute http(s) URI', () => {
 	assert.equal(parseConnectionDiscovery(JSON.stringify({ pid: 1 })), null);
 	assert.equal(parseConnectionDiscovery(JSON.stringify({ uri: 123, pid: 1 })), null);
+	assert.equal(parseConnectionDiscovery(JSON.stringify({ uri: '', pid: 1 })), null);
+	assert.equal(parseConnectionDiscovery(JSON.stringify({ uri: 'localhost:54321', pid: 1 })), null);
+	assert.equal(parseConnectionDiscovery(JSON.stringify({ uri: 'ws://localhost:54321', pid: 1 })), null);
+	assert.equal(parseConnectionDiscovery(JSON.stringify({ uri: 'not a uri', pid: 1 })), null);
 });
 
-test('returns null when pid is missing or not a number', () => {
+test('returns null when pid is missing, not a number, zero, negative, or fractional', () => {
 	assert.equal(parseConnectionDiscovery(JSON.stringify({ uri: INFO.uri })), null);
 	assert.equal(parseConnectionDiscovery(JSON.stringify({ uri: INFO.uri, pid: '4242' })), null);
+	assert.equal(parseConnectionDiscovery(JSON.stringify({ uri: INFO.uri, pid: 0 })), null);
+	assert.equal(parseConnectionDiscovery(JSON.stringify({ uri: INFO.uri, pid: -4242 })), null);
+	assert.equal(parseConnectionDiscovery(JSON.stringify({ uri: INFO.uri, pid: 42.5 })), null);
 });
 
 test('ignores unknown extra fields from a future file version', () => {
@@ -93,4 +105,34 @@ test('ignores unknown extra fields from a future file version', () => {
 		JSON.stringify({ ...INFO, someFutureField: 'ignore me' }),
 	);
 	assert.deepEqual(parsed, INFO);
+});
+
+test('ignores a legacy apiKey field from a pre-#1851-fix file', () => {
+	const parsed = parseConnectionDiscovery(JSON.stringify({ ...INFO, apiKey: 'MYAPIKEY' }));
+	assert.deepEqual(parsed, INFO);
+});
+
+// --- isLoopbackDiscoveryUri ---------------------------------------------------
+
+test('accepts the standard loopback spellings', () => {
+	assert.ok(isLoopbackDiscoveryUri('http://localhost:54321'));
+	assert.ok(isLoopbackDiscoveryUri('http://127.0.0.1:54321'));
+	assert.ok(isLoopbackDiscoveryUri('http://[::1]:54321'));
+});
+
+test('accepts alternate loopback encodings that normalize to the standard form', () => {
+	assert.ok(isLoopbackDiscoveryUri('http://0177.0.0.1:54321')); // octal
+	assert.ok(isLoopbackDiscoveryUri('http://2130706433:54321')); // decimal
+	assert.ok(isLoopbackDiscoveryUri('http://127.1:54321')); // shortened
+	assert.ok(isLoopbackDiscoveryUri('http://[0:0:0:0:0:0:0:1]:54321')); // expanded IPv6
+});
+
+test('rejects a non-loopback host', () => {
+	assert.equal(isLoopbackDiscoveryUri('http://attacker.example.com:54321'), false);
+	assert.equal(isLoopbackDiscoveryUri('http://192.168.1.5:54321'), false);
+});
+
+test('rejects a malformed URI rather than throwing', () => {
+	assert.equal(isLoopbackDiscoveryUri('not a uri'), false);
+	assert.equal(isLoopbackDiscoveryUri(''), false);
 });

@@ -78,6 +78,8 @@ The Python SDK checks this file automatically as a fallback: when `RocketRideCli
 
 This is a "last-connected" file, not a registry of every simultaneously-running local engine across multiple VS Code windows — for the common one-developer-one-local-engine case that's exactly the desired behavior.
 
+The file carries no credential — only `uri`, `pid`, and `updatedAt` — and is written mode `0600` (POSIX; a no-op on Windows) so only your OS user can read it. A reader (the Python SDK's fallback above) only ever trusts a discovered URI whose host is loopback (`localhost`/`127.0.0.1`/`::1`); this file is meant to name a local engine only, and a discovered URI is combined with your real API key (from `ROCKETRIDE_APIKEY`/`auth`) when connecting, so a non-loopback host is never adopted from it.
+
 ## Monitoring Execution
 
 The **Status** page shows:
