@@ -90,3 +90,35 @@ def test_open_does_not_retry_non_transient_failure():
         assert not pipe.is_opened
 
     asyncio.run(run_test())
+
+
+def test_open_does_not_retry_connection_refused():
+    # "Connection refused" is a distinct, permanent signature (e.g. a
+    # misconfigured `remote` node) that the engine's inner connect-retry loop
+    # never runs for, unlike "Connect call failed" - retrying it would just add
+    # latency to a failure that was never going to succeed.
+    pipe, transport = _make_pipe([('fail', "Connection refused ('127.0.0.1', 40006)")])
+
+    async def run_test():
+        with pytest.raises(PipeException, match='Connection refused'):
+            await pipe.open()
+        assert transport.send_count == 1
+        assert not pipe.is_opened
+
+    asyncio.run(run_test())
+
+
+def test_open_failure_keeps_message_and_carries_hint():
+    pipe, transport = _make_pipe([('fail', 'No pipeline found for token')])
+
+    async def run_test():
+        with pytest.raises(PipeException) as excinfo:
+            await pipe.open()
+        exc = excinfo.value
+        # The server's message is preserved verbatim (fit to show an end user);
+        # the developer checklist rides along separately as `hint`.
+        assert str(exc) == 'No pipeline found for token'
+        assert exc.hint is not None
+        assert 'Common causes' in exc.hint
+
+    asyncio.run(run_test())
