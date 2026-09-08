@@ -410,8 +410,8 @@ Returned by `await client.pipe(...)`. One streaming upload: **open** -> **write*
 
 `open()` retries once automatically if it hits a transient "Connect call
 failed" while the pipeline's data listener is still starting up (worst case
-adds ~1.5s); a `PipeException` from `open()` means the pipe genuinely could
-not be opened.
+adds ~1.75s); a `PipeException` from `open()` means it kept failing past that
+retry budget.
 
 ---
 

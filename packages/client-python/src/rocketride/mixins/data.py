@@ -181,9 +181,9 @@ class DataMixin(DAPClient):
 
             If the only problem is a transient "Connect call failed" while the
             pipeline's data listener is still starting up, this retries once
-            before giving up - worst case that adds ~1.5s (the engine's own
-            internal connect retry runs again on the retry). Any other failure
-            raises immediately on the first attempt.
+            before giving up - worst case that adds ~1.75s (a short backoff,
+            then the engine's own internal connect retry runs again on the
+            retry). Any other failure raises immediately on the first attempt.
 
             Returns:
                 self: The opened pipe instance for method chaining
