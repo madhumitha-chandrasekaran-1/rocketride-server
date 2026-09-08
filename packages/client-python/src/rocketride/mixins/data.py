@@ -219,11 +219,15 @@ class DataMixin(DAPClient):
                 if not self._client.did_fail(response):
                     break
 
-                message = response.get('message') or ''
-                if not isinstance(message, str):
+                message = response.get('message')
+                if message is None:
+                    message = ''
+                elif not isinstance(message, str):
                     # A well-behaved server always sends a string, but don't let a
                     # malformed one (e.g. a bare int/bool) blow up the `in` check
-                    # below or the PipeException raised past the retry.
+                    # below or the PipeException raised past the retry. `or ''`
+                    # here would also turn falsey-but-real values like `0`/`False`
+                    # into an empty message, so check for absence explicitly.
                     message = str(message)
                 if attempt < _PIPE_OPEN_RETRY_ATTEMPTS and _is_transient_pipe_open_error(message):
                     await asyncio.sleep(_PIPE_OPEN_RETRY_BACKOFF_SECONDS * attempt)

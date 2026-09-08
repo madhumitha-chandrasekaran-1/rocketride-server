@@ -122,6 +122,20 @@ def test_open_does_not_retry_non_string_failure_message():
     asyncio.run(run_test())
 
 
+def test_open_preserves_falsey_non_string_failure_message():
+    # `0`/`False` are real messages, not "no message" - they must survive
+    # normalization instead of being swallowed into the generic fallback.
+    pipe, transport = _make_pipe([('fail', 0)])
+
+    async def run_test():
+        with pytest.raises(PipeException, match='0'):
+            await pipe.open()
+        assert transport.send_count == 1
+        assert not pipe.is_opened
+
+    asyncio.run(run_test())
+
+
 def test_open_failure_keeps_message_and_carries_hint():
     pipe, transport = _make_pipe([('fail', 'No pipeline found for token')])
 
