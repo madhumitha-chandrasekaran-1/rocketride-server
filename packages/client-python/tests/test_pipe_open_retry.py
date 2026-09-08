@@ -108,6 +108,20 @@ def test_open_does_not_retry_connection_refused():
     asyncio.run(run_test())
 
 
+def test_open_does_not_retry_non_string_failure_message():
+    # A malformed response with a non-string `message` (e.g. a bare int) must
+    # not blow up the `in` check that classifies transient errors.
+    pipe, transport = _make_pipe([('fail', 404)])
+
+    async def run_test():
+        with pytest.raises(PipeException, match='404'):
+            await pipe.open()
+        assert transport.send_count == 1
+        assert not pipe.is_opened
+
+    asyncio.run(run_test())
+
+
 def test_open_failure_keeps_message_and_carries_hint():
     pipe, transport = _make_pipe([('fail', 'No pipeline found for token')])
 

@@ -220,6 +220,11 @@ class DataMixin(DAPClient):
                     break
 
                 message = response.get('message') or ''
+                if not isinstance(message, str):
+                    # A well-behaved server always sends a string, but don't let a
+                    # malformed one (e.g. a bare int/bool) blow up the `in` check
+                    # below or the PipeException raised past the retry.
+                    message = str(message)
                 if attempt < _PIPE_OPEN_RETRY_ATTEMPTS and _is_transient_pipe_open_error(message):
                     await asyncio.sleep(_PIPE_OPEN_RETRY_BACKOFF_SECONDS * attempt)
                     continue
