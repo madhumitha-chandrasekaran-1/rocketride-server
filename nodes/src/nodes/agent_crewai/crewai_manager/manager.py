@@ -37,9 +37,9 @@ tool path), not via the `crewai` channel.
 from __future__ import annotations
 
 import json
-from typing import Any, List
+from typing import Any, List, Tuple
 
-from rocketlib import debug
+from rocketlib import debug, error, warning
 
 from ai.common.agent import AgentContext
 from ai.common.agent._internal.host import AgentHostServices
@@ -105,6 +105,41 @@ def _strip_react_preamble(text: str) -> str:
         #    clean error.
         return ''
     return text
+
+
+def _finalize_answer(findings: List[str], final_text: str, result: Any) -> str:
+    """Assemble the manager's final answer, falling back to `result.raw` only
+    when there is truly nothing else to use.
+
+    Ladder:
+      1. `final_text` -- the synthesis output -- when synthesis produced
+         usable text.
+      2. The raw `findings`, joined, when synthesis produced nothing (the
+         call returned empty, or raised) but at least one delegate did.
+      3. `result.raw`, ReAct-stripped -- only when no delegate produced
+         usable output at all.
+
+    Rung 3 must never be reached while any finding exists: in hierarchical
+    mode `result.raw` is the last delegate task's own raw output (see the
+    comment at the `_synthesize_delegate_findings` call site), so falling
+    back to it while findings are available would silently reintroduce
+    #1848 -- one subagent's answer presented as the manager's, with nothing
+    to distinguish it from a real synthesis at the point of use.
+
+    A free function (not a method) so it's testable with plain values,
+    without a `CrewManager` instance or any CrewAI/LLM machinery -- this is
+    exactly the seam #1848's regression lives on.
+    """
+    if final_text:
+        return final_text
+    if findings:
+        return '\n\n'.join(findings)
+    raw = (
+        safe_str(getattr(result, 'raw', None))
+        or safe_str(getattr(getattr(result, 'result', None), 'raw', None))
+        or safe_str(result)
+    )
+    return _strip_react_preamble(raw)
 
 
 _MGR_ROLE = 'Manager'
@@ -352,8 +387,22 @@ class CrewManager(CrewBase):
         # channel -- otherwise "the manager's answer" is just whichever single
         # delegate's output happens to be picked, which defeats the entire
         # point of a manager (see the goal/backstory above).
+        #
+        # Checked whether CrewAI already exposes a distinct manager-authored
+        # answer instead of a delegate's raw output (crewai==1.15.10, within
+        # our >=1.14.1,<2 pin): `CrewOutput` (crewai/crews/crew_output.py)
+        # only carries `raw`, `pydantic`, `json_dict`, `tasks_output`, and
+        # `token_usage` -- no separate manager field. `Crew._create_crew_output`
+        # (crewai/crew.py) builds `raw` from
+        # `[t for t in task_outputs if t.raw][-1].raw`, and `task_outputs` is
+        # one entry per item in the `tasks` list `Crew(...)` was given --
+        # which above is `sub_tasks`, not a separate manager task (hierarchical
+        # mode delegates the given tasks; it does not add its own). So
+        # `result.raw` provably IS one delegate's raw output, not a manager
+        # synthesis -- there is no free alternative to the LLM-based synthesis
+        # below in this CrewAI version.
         tasks_out = getattr(result, 'tasks_output', None) or []
-        final_text = self._synthesize_delegate_findings(
+        findings, final_text = self._synthesize_delegate_findings(
             context=context,
             tasks_out=tasks_out,
             sub_tasks=sub_tasks,
@@ -361,18 +410,7 @@ class CrewManager(CrewBase):
             manager_goal=ig.goal or _MGR_GOAL,
         )
 
-        if not final_text:
-            # No delegate produced usable output (or the synthesis call itself
-            # came back empty) -- fall back to result.raw, ReAct-stripped, same
-            # as before this method existed.
-            raw = (
-                safe_str(getattr(result, 'raw', None))
-                or safe_str(getattr(getattr(result, 'result', None), 'raw', None))
-                or safe_str(result)
-            )
-            final_text = _strip_react_preamble(raw)
-
-        return final_text, result
+        return _finalize_answer(findings, final_text, result), result
 
     def _synthesize_delegate_findings(
         self,
@@ -382,7 +420,7 @@ class CrewManager(CrewBase):
         sub_tasks: List[Any],
         manager_backstory: str,
         manager_goal: str,
-    ) -> str:
+    ) -> Tuple[List[str], str]:
         """Combine every delegate's clean task output into the manager's own answer.
 
         `tasks_out` and `sub_tasks` are positional (`crew.tasks` executes in
@@ -390,10 +428,27 @@ class CrewManager(CrewBase):
         execution order), so zipping them pairs each raw output with the
         delegate that produced it -- used only to label findings by role.
 
-        Returns ``''`` when no delegate produced usable output, so the caller
-        falls back to `result.raw`.
+        Returns ``(findings, final_text)``. ``findings`` is every usable,
+        role-labeled delegate output found (``[]`` if none were); the caller
+        (`_finalize_answer`) uses it as the fallback when synthesis produces
+        nothing, so the delegate work already paid for is never silently
+        discarded. ``final_text`` is the synthesis output, or ``''`` when
+        there was nothing to synthesize (no findings), exactly one finding
+        (see below), or the synthesis call itself produced nothing or failed.
+
+        With exactly one finding there is nothing to synthesize -- asking the
+        model to "combine" a single finding only risks paraphrasing away
+        detail it already got right, at the cost of an extra LLM round trip
+        for no benefit. Returned verbatim (its ``### <role>`` label stripped)
+        instead, without calling the LLM. This does not reopen #1848: that
+        bug is dropping N-1 of N findings, which cannot happen when N=1.
+
+        With two or more findings, synthesis is an unconditional extra LLM
+        round trip per manager run (the same cost the `planning` flag above
+        opts out of by default) -- accepted here because combining findings
+        is the manager's actual job, unlike planning.
         """
-        findings = []
+        findings: List[str] = []
         for sub_task, task_out in zip(sub_tasks, tasks_out):
             candidate = safe_str(getattr(task_out, 'raw', None))
             if not candidate:
@@ -405,7 +460,10 @@ class CrewManager(CrewBase):
             findings.append(f'### {role}\n{stripped}')
 
         if not findings:
-            return ''
+            return [], ''
+
+        if len(findings) == 1:
+            return findings, findings[0].split('\n', 1)[1]
 
         synthesis_prompt = (
             f'{manager_backstory}\n\n'
@@ -415,4 +473,28 @@ class CrewManager(CrewBase):
             'synthesizing these findings together -- never return one finding '
             'verbatim as the final answer.\n\n' + '\n\n'.join(findings)
         )
-        return safe_str(self.call_llm(context, synthesis_prompt, role=_MGR_ROLE)).strip()
+        try:
+            final_text = safe_str(self.call_llm(context, synthesis_prompt, role=_MGR_ROLE)).strip()
+        except Exception as e:
+            # A provider hiccup here must not lose the N delegate runs already
+            # paid for -- degrade to the unsynthesized findings via
+            # `_finalize_answer` rather than letting this propagate out of
+            # `_run` (which would discard `findings` along with everything else).
+            error(
+                'agent_crewai_manager synthesis call_llm failed run_id={} type={} message={}'.format(
+                    context.run_id, type(e).__name__, str(e)
+                )
+            )
+            return findings, ''
+
+        if not final_text:
+            # Not an error -- e.g. the model returned an empty completion --
+            # but still worth a log line: `_finalize_answer` recovers using
+            # `findings`, so this would otherwise be as silent as the bug
+            # #1848 reports.
+            warning(
+                'agent_crewai_manager synthesis produced no usable text from {} finding(s) run_id={}; '
+                'falling back to unsynthesized findings'.format(len(findings), context.run_id)
+            )
+
+        return findings, final_text

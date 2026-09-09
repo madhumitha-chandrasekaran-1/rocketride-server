@@ -72,6 +72,8 @@ def _build_stubs() -> dict:
     mod_rocketlib = types.ModuleType('rocketlib')
     mod_rocketlib.ToolDescriptor = dict
     mod_rocketlib.debug = lambda *a, **k: None
+    mod_rocketlib.error = lambda *a, **k: None
+    mod_rocketlib.warning = lambda *a, **k: None
     # Package __init__.py also pulls in IInstance.py / IGlobal.py (sibling
     # node-facing classes, unrelated to _synthesize_delegate_findings), which
     # need these additional rocketlib/ai.common seams to import.
@@ -239,7 +241,7 @@ class TestImportManagerModuleCleanup:
             sys.modules.update(saved)
 
 
-def _make_manager(call_llm_return: str = '') -> Any:
+def _make_manager(call_llm_return: str = '', call_llm_side_effect: Any = None) -> Any:
     """A CrewManager instance with __init__ bypassed and call_llm stubbed.
 
     __init__ resolves node config via the engine's Config/iGlobal seams,
@@ -247,7 +249,7 @@ def _make_manager(call_llm_return: str = '') -> Any:
     only touches `self.call_llm`.
     """
     manager = object.__new__(CrewManager)
-    manager.call_llm = MagicMock(return_value=call_llm_return)
+    manager.call_llm = MagicMock(return_value=call_llm_return, side_effect=call_llm_side_effect)
     return manager
 
 
@@ -263,7 +265,11 @@ def _sub_task(role: str) -> Any:
 
 class TestSynthesizeDelegateFindings:
     def test_combines_all_delegate_findings_not_just_one(self):
-        """The exact bug: with 3 subagents, all 3 must feed the synthesis call."""
+        """The exact bug: with 3 subagents, all 3 must feed the synthesis call,
+        and the returned text must be the synthesis, not any one finding
+        verbatim (folds in the former standalone verbatim-check test -- same
+        seam, this one already asserts the stronger claim).
+        """
         manager = _make_manager(call_llm_return='The synthesized answer.')
         sub_tasks = [_sub_task('Research Subagent'), _sub_task('Writer Subagent'), _sub_task('Critic Subagent')]
         tasks_out = [
@@ -272,7 +278,7 @@ class TestSynthesizeDelegateFindings:
             _task_out('Final Answer: critique finding'),
         ]
 
-        result = manager._synthesize_delegate_findings(
+        findings, result = manager._synthesize_delegate_findings(
             context=MagicMock(),
             tasks_out=tasks_out,
             sub_tasks=sub_tasks,
@@ -281,6 +287,8 @@ class TestSynthesizeDelegateFindings:
         )
 
         assert result == 'The synthesized answer.'
+        assert result not in ('research finding', 'draft finding', 'critique finding')
+        assert len(findings) == 3
         prompt_sent = manager.call_llm.call_args.args[1]
         assert 'research finding' in prompt_sent
         assert 'draft finding' in prompt_sent
@@ -288,24 +296,6 @@ class TestSynthesizeDelegateFindings:
         assert 'Research Subagent' in prompt_sent
         assert 'Writer Subagent' in prompt_sent
         assert 'Critic Subagent' in prompt_sent
-
-    def test_result_is_the_synthesis_not_any_single_finding_verbatim(self):
-        """Guards the reported symptom directly: a subagent's raw text must
-        never be byte-identical to the returned final answer.
-        """
-        manager = _make_manager(call_llm_return='Combined: all three checks passed.')
-        sub_tasks = [_sub_task('A'), _sub_task('B')]
-        tasks_out = [_task_out('Final Answer: A said X'), _task_out('Final Answer: B said Y')]
-
-        result = manager._synthesize_delegate_findings(
-            context=MagicMock(),
-            tasks_out=tasks_out,
-            sub_tasks=sub_tasks,
-            manager_backstory='backstory',
-            manager_goal='goal',
-        )
-
-        assert result not in ('A said X', 'B said Y')
 
     def test_order_of_wired_subagents_does_not_change_which_findings_are_used(self):
         """Reordering inputs must not drop a finding -- only relabel it."""
@@ -333,17 +323,21 @@ class TestSynthesizeDelegateFindings:
             assert 'two' in prompt
 
     def test_skips_delegates_with_empty_or_unstrippable_output(self):
-        manager = _make_manager(call_llm_return='synthesized')
+        """The empty delegate must not reach the survivor count: with only
+        one usable delegate left, the single-finding short-circuit applies
+        (see TestSingleFindingShortCircuit), so no LLM call happens here.
+        """
+        manager = _make_manager(call_llm_return='should not be used')
         sub_tasks = [_sub_task('Empty'), _sub_task('Real')]
         tasks_out = [_task_out(''), _task_out('Final Answer: the only real finding')]
 
-        result = manager._synthesize_delegate_findings(
+        findings, result = manager._synthesize_delegate_findings(
             context=MagicMock(), tasks_out=tasks_out, sub_tasks=sub_tasks, manager_backstory='b', manager_goal='g'
         )
 
-        assert result == 'synthesized'
-        prompt_sent = manager.call_llm.call_args.args[1]
-        assert 'the only real finding' in prompt_sent
+        assert findings == ['### Real\nthe only real finding']
+        assert result == 'the only real finding'
+        manager.call_llm.assert_not_called()
 
     def test_no_usable_delegate_output_returns_empty_without_calling_llm(self):
         """Lets the caller fall back to result.raw instead of synthesizing nothing."""
@@ -351,21 +345,140 @@ class TestSynthesizeDelegateFindings:
         sub_tasks = [_sub_task('A')]
         tasks_out = [_task_out('')]
 
-        result = manager._synthesize_delegate_findings(
+        findings, result = manager._synthesize_delegate_findings(
             context=MagicMock(), tasks_out=tasks_out, sub_tasks=sub_tasks, manager_backstory='b', manager_goal='g'
         )
 
+        assert findings == []
         assert result == ''
         manager.call_llm.assert_not_called()
 
     def test_mismatched_lengths_do_not_crash(self):
-        """More task outputs than known sub_tasks (or vice versa) must not raise."""
-        manager = _make_manager(call_llm_return='synthesized')
-        sub_tasks: List[Any] = [_sub_task('Only one known')]
-        tasks_out = [_task_out('Final Answer: one'), _task_out('Final Answer: two')]
+        """More task outputs than known sub_tasks (or vice versa) must not raise.
 
-        result = manager._synthesize_delegate_findings(
+        Two sub_tasks against three task outputs so zip's truncation to two
+        pairs still leaves two findings -- keeping this test on the
+        synthesis path, distinct from the single-finding short-circuit.
+        """
+        manager = _make_manager(call_llm_return='synthesized')
+        sub_tasks: List[Any] = [_sub_task('First known'), _sub_task('Second known')]
+        tasks_out = [
+            _task_out('Final Answer: one'),
+            _task_out('Final Answer: two'),
+            _task_out('Final Answer: unmatched, no sub_task for this one'),
+        ]
+
+        findings, result = manager._synthesize_delegate_findings(
             context=MagicMock(), tasks_out=tasks_out, sub_tasks=sub_tasks, manager_backstory='b', manager_goal='g'
         )
 
+        assert len(findings) == 2
         assert result == 'synthesized'
+
+
+class TestSingleFindingShortCircuit:
+    """#1855 review (asclearuc): with exactly one usable delegate finding,
+    synthesizing "together" is meaningless -- return it verbatim (label
+    stripped) without spending an LLM call that can only paraphrase it worse.
+    """
+
+    def test_single_finding_returned_verbatim_without_calling_llm(self):
+        manager = _make_manager(call_llm_return='should not be used')
+        sub_tasks = [_sub_task('Solo Subagent')]
+        tasks_out = [_task_out('Final Answer: the only finding')]
+
+        findings, result = manager._synthesize_delegate_findings(
+            context=MagicMock(), tasks_out=tasks_out, sub_tasks=sub_tasks, manager_backstory='b', manager_goal='g'
+        )
+
+        assert findings == ['### Solo Subagent\nthe only finding']
+        assert result == 'the only finding'
+        manager.call_llm.assert_not_called()
+
+    def test_does_not_reopen_1848_dropping_findings(self):
+        """#1848 is dropping N-1 of N findings. With N=1 there is nothing to
+        drop, so returning the sole finding verbatim is not a regression.
+        """
+        manager = _make_manager()
+        sub_tasks = [_sub_task('Only One')]
+        tasks_out = [_task_out('Final Answer: complete and correct answer')]
+
+        findings, result = manager._synthesize_delegate_findings(
+            context=MagicMock(), tasks_out=tasks_out, sub_tasks=sub_tasks, manager_backstory='b', manager_goal='g'
+        )
+
+        assert result == 'complete and correct answer'
+        assert len(findings) == 1
+
+
+class TestSynthesisFailureModes:
+    """#1855 review (asclearuc), MUST-fix item: an empty or failed synthesis
+    call must not discard the delegate findings it had in hand -- `_run`
+    (via `_finalize_answer`) falls back to them, never straight to
+    `result.raw`, which would silently reintroduce #1848 on a new path.
+    """
+
+    def test_empty_synthesis_still_returns_the_findings(self):
+        """call_llm returning '' (e.g. an empty model completion) must not
+        lose the findings the caller needs for its own fallback.
+        """
+        manager = _make_manager(call_llm_return='')
+        sub_tasks = [_sub_task('A'), _sub_task('B')]
+        tasks_out = [_task_out('Final Answer: finding A'), _task_out('Final Answer: finding B')]
+
+        findings, result = manager._synthesize_delegate_findings(
+            context=MagicMock(), tasks_out=tasks_out, sub_tasks=sub_tasks, manager_backstory='b', manager_goal='g'
+        )
+
+        assert result == ''
+        assert len(findings) == 2
+
+    def test_call_llm_raising_still_returns_the_findings(self):
+        """A provider hiccup (rate limit, timeout, 5xx) inside call_llm must
+        degrade to an empty synthesis, not propagate and lose the findings.
+        """
+        manager = _make_manager(call_llm_side_effect=RuntimeError('rate limited'))
+        sub_tasks = [_sub_task('A'), _sub_task('B')]
+        tasks_out = [_task_out('Final Answer: finding A'), _task_out('Final Answer: finding B')]
+
+        findings, result = manager._synthesize_delegate_findings(
+            context=MagicMock(), tasks_out=tasks_out, sub_tasks=sub_tasks, manager_backstory='b', manager_goal='g'
+        )
+
+        assert result == ''
+        assert len(findings) == 2
+
+
+class TestFinalizeAnswer:
+    """Direct tests of `_finalize_answer`'s fallback ladder -- the seam
+    #1855's regression actually lives on, and (before this PR) had no
+    coverage: it is a free function taking plain values, so these need no
+    CrewManager instance, LLM, or CrewAI machinery at all.
+    """
+
+    def test_prefers_final_text_when_present(self):
+        result = manager_module._finalize_answer(['### A\nfinding a'], 'the synthesis', MagicMock(raw='raw trace'))
+        assert result == 'the synthesis'
+
+    def test_falls_back_to_joined_findings_when_final_text_empty(self):
+        """The core regression pin: an empty synthesis with findings on hand
+        must use the findings, never `result.raw` -- reaching `result.raw`
+        here would silently reintroduce #1848.
+        """
+        findings = ['### A\nfinding a', '### B\nfinding b']
+        fake_result = MagicMock(raw='Thought: ...\nFinal Answer: finding b')
+
+        result = manager_module._finalize_answer(findings, '', fake_result)
+
+        assert result == '### A\nfinding a\n\n### B\nfinding b'
+        assert result != 'finding b'
+
+    def test_falls_back_to_result_raw_only_when_no_findings_exist(self):
+        """The pre-#1848 behavior, kept as the last resort for the genuinely
+        no-usable-output case (no delegate produced anything at all).
+        """
+        fake_result = MagicMock(raw='Thought: ...\nFinal Answer: only usable text')
+
+        result = manager_module._finalize_answer([], '', fake_result)
+
+        assert result == 'only usable text'
