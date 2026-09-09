@@ -164,7 +164,7 @@ export class EngineLocal extends EngineBackend {
 		this.emitStatus({
 			phase: 'ready',
 			message: 'Local engine ready',
-			uri: `http://localhost:${this.actualPort}`,
+			uri: `http://127.0.0.1:${this.actualPort}`,
 			version: installed?.tag,
 		});
 	}
@@ -194,7 +194,7 @@ export class EngineLocal extends EngineBackend {
 			this.emitStatus({
 				phase: 'ready',
 				message: 'Local engine ready',
-				uri: `http://localhost:${this.actualPort}`,
+				uri: `http://127.0.0.1:${this.actualPort}`,
 				version: installed?.tag,
 			});
 		} else {
@@ -446,6 +446,11 @@ export class EngineLocal extends EngineBackend {
 	 *
 	 * Runs under `withDiscoveryLock` (see its doc comment) so this can't
 	 * interleave with another window's `removeConnectionDiscovery`.
+	 *
+	 * `127.0.0.1`, not `localhost` -- same reasoning as the `--host` flag
+	 * above: the engine only binds that literal address, and a resolver that
+	 * prefers `::1` for `localhost` would have a reader try, and fail
+	 * against, a socket nothing is listening on.
 	 */
 	private writeConnectionDiscovery(pid: number): void {
 		if (this.actualPort === undefined) return;
@@ -455,7 +460,7 @@ export class EngineLocal extends EngineBackend {
 				fs.writeFileSync(
 					filePath,
 					serializeConnectionDiscovery({
-						uri: `http://localhost:${this.actualPort}`,
+						uri: `http://127.0.0.1:${this.actualPort}`,
 						pid,
 						updatedAt: new Date().toISOString(),
 					}),

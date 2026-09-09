@@ -68,12 +68,30 @@ try:
 except ImportError:
     websockets = None
 
-# `proxy=None` (explicitly disable proxy auto-detection) was added to
-# `websockets.connect()` well after this package's `websockets>=11.0.0` floor
-# -- check for it at import time rather than assume every installed version
-# has it, so an older-but-still-supported install degrades to prior behavior
-# (proxy env vars apply) instead of a `TypeError` on every connect.
-_WEBSOCKETS_SUPPORTS_PROXY_KWARG = bool(websockets) and 'proxy' in inspect.signature(websockets.connect).parameters
+
+def _detect_proxy_kwarg_support() -> bool:
+    """True if the installed `websockets.connect()` accepts `proxy=`.
+
+    `proxy=None` (explicitly disable proxy auto-detection) was added well
+    after this package's `websockets>=11.0.0` floor -- check for it at import
+    time rather than assume every installed version has it, so an
+    older-but-still-supported install degrades to prior behavior (proxy env
+    vars apply) instead of a `TypeError` on every connect.
+
+    `inspect.signature()` can itself raise (`ValueError`/`TypeError`) for a
+    callable it can't introspect; this module is imported by
+    `rocketride.core`, so an uncaught exception here would break importing
+    the whole SDK over what should only ever gate one optional kwarg.
+    """
+    if not websockets:
+        return False
+    try:
+        return 'proxy' in inspect.signature(websockets.connect).parameters
+    except (ValueError, TypeError):
+        return False
+
+
+_WEBSOCKETS_SUPPORTS_PROXY_KWARG = _detect_proxy_kwarg_support()
 
 # Optional dependency handling for FastAPI
 try:

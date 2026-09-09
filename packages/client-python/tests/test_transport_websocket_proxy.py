@@ -31,6 +31,7 @@ proxy behavior untouched.
 """
 
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -91,3 +92,28 @@ async def test_connect_omits_proxy_kwarg_on_older_websockets():
         await transport._receive_task
 
     assert 'proxy' not in mock_connect.call_args.kwargs
+
+
+def test_detect_proxy_kwarg_support_survives_uninspectable_connect():
+    """CodeRabbit on #1874: inspect.signature() can itself raise for a
+    callable it can't introspect. This module is imported by
+    rocketride.core, so an uncaught exception here would break importing the
+    whole SDK -- the detector must swallow it and default to False.
+    """
+    fake_websockets = SimpleNamespace(connect=lambda *a, **kw: None)
+    with (
+        patch.object(tw, 'websockets', fake_websockets),
+        patch.object(tw.inspect, 'signature', side_effect=ValueError('no signature found')),
+    ):
+        assert tw._detect_proxy_kwarg_support() is False
+
+    with (
+        patch.object(tw, 'websockets', fake_websockets),
+        patch.object(tw.inspect, 'signature', side_effect=TypeError('not a callable')),
+    ):
+        assert tw._detect_proxy_kwarg_support() is False
+
+
+def test_detect_proxy_kwarg_support_false_when_websockets_missing():
+    with patch.object(tw, 'websockets', None):
+        assert tw._detect_proxy_kwarg_support() is False
