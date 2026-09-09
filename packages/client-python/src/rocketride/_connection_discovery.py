@@ -49,7 +49,7 @@ reader to trust it as one.
 
 Security note: discovery only ever means "a local engine on this machine."
 A discovery file naming a non-loopback host is never trusted -- see
-``_is_loopback_host`` -- because adopting an arbitrary discovered URI would
+``is_loopback_host`` -- because adopting an arbitrary discovered URI would
 hand it whatever real credential the caller supplies via ``auth``/
 ``ROCKETRIDE_APIKEY``, redirecting it to that host.
 """
@@ -104,8 +104,14 @@ def _is_absolute_http_uri(uri: str) -> bool:
     return parsed.scheme in ('http', 'https') and bool(parsed.hostname)
 
 
-def _is_loopback_host(hostname: str) -> bool:
+def is_loopback_host(hostname: str) -> bool:
     """True when ``hostname`` is ``localhost`` or a loopback IP address.
+
+    Public (not module-private) because it's also used outside discovery: see
+    ``TransportWebSocket.connect()``, which bypasses any configured proxy for
+    a loopback target -- an env-configured proxy would otherwise still see
+    (and could intercept) a ``ws://localhost:PORT`` connection and the real
+    credential sent over it, discovery-selected or not.
 
     ``ipaddress.ip_address`` only accepts strict, unambiguous dotted-decimal
     IPv4 (or standard IPv6) -- it rejects the octal/decimal/shortened
@@ -136,7 +142,7 @@ def is_loopback_discovery_uri(uri: str) -> bool:
         hostname = urllib.parse.urlparse(uri).hostname
     except ValueError:
         return False
-    return bool(hostname) and _is_loopback_host(hostname)
+    return bool(hostname) and is_loopback_host(hostname)
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -179,6 +185,16 @@ def _is_process_alive_windows(pid: int) -> bool:
     # `use_last_error=True` so `ctypes.get_last_error()` below reflects this
     # call's `GetLastError()` (`ctypes.windll` doesn't track it).
     kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)  # type: ignore[attr-defined]
+    # `HANDLE` is pointer-sized (64 bits on 64-bit Windows); ctypes defaults an
+    # unset restype to `c_int` (32 bits), which would truncate the handle
+    # OpenProcess returns before GetExitCodeProcess/CloseHandle use it. Declare
+    # every signature explicitly rather than rely on the default.
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         # ERROR_INVALID_PARAMETER means no such process; anything else (e.g.

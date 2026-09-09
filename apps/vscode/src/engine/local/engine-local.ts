@@ -28,7 +28,7 @@ import { EngineBackend, type StatusEmitter, type EngineInfo, type EngineBackendS
 import type { ConnectionMode } from '../../config';
 import { getUserConfigDir } from '../config/config-migration';
 import { EngineInstaller } from '../shared/engine-installer';
-import { connectionDiscoveryPath, parseConnectionDiscovery, serializeConnectionDiscovery } from './connectionDiscovery';
+import { connectionDiscoveryPath, parseConnectionDiscovery, serializeConnectionDiscovery, withDiscoveryLock } from './connectionDiscovery';
 import type { ConnectionGroupConfig } from '../../config';
 import { getLogger } from '../../shared/util/output';
 import { icons } from '../../shared/util/icons';
@@ -443,42 +443,57 @@ export class EngineLocal extends EngineBackend {
 	 * gets sent to (see `isLoopbackDiscoveryUri` in connectionDiscovery.ts for
 	 * why a reader must independently constrain the host, not trust this file
 	 * blindly). `mode` is a POSIX permission bit and a no-op on Windows.
+	 *
+	 * Runs under `withDiscoveryLock` (see its doc comment) so this can't
+	 * interleave with another window's `removeConnectionDiscovery`.
 	 */
 	private writeConnectionDiscovery(pid: number): void {
 		if (this.actualPort === undefined) return;
 		const filePath = connectionDiscoveryPath(this.installer.dir);
-		try {
-			fs.writeFileSync(
-				filePath,
-				serializeConnectionDiscovery({
-					uri: `http://localhost:${this.actualPort}`,
-					pid,
-					updatedAt: new Date().toISOString(),
-				}),
-				{ mode: 0o600 },
-			);
-			// `mode` above only applies when writeFileSync actually creates the
-			// file; an install upgrading from a version that wrote it 0644 would
-			// otherwise keep truncating-and-rewriting that same looser mode
-			// forever. chmod unconditionally, best-effort.
-			fs.chmodSync(filePath, 0o600);
-		} catch {
-			/* best-effort */
-		}
+		withDiscoveryLock(filePath, () => {
+			try {
+				fs.writeFileSync(
+					filePath,
+					serializeConnectionDiscovery({
+						uri: `http://localhost:${this.actualPort}`,
+						pid,
+						updatedAt: new Date().toISOString(),
+					}),
+					{ mode: 0o600 },
+				);
+				// `mode` above only applies when writeFileSync actually creates the
+				// file; an install upgrading from a version that wrote it 0644 would
+				// otherwise keep truncating-and-rewriting that same looser mode
+				// forever. chmod unconditionally, best-effort.
+				fs.chmodSync(filePath, 0o600);
+			} catch {
+				/* best-effort */
+			}
+		});
 	}
 
 	/** Removes the connection discovery file, but only if it's still this
 	 * process's own entry -- an already-running second local engine (a
 	 * different VS Code window) may have overwritten it with its own, and
-	 * this process stopping must not clobber that live entry. */
+	 * this process stopping must not clobber that live entry.
+	 *
+	 * The read-check-unlink here and the write in `writeConnectionDiscovery`
+	 * both run under `withDiscoveryLock`, so a second window's write can no
+	 * longer land in the gap between this function's read and its unlink --
+	 * without the lock, that gap is exactly wide enough for this process to
+	 * read the file before the second window overwrites it, then delete the
+	 * second window's now-current entry out from under it.
+	 */
 	private removeConnectionDiscovery(pid: number): void {
 		const filePath = connectionDiscoveryPath(this.installer.dir);
-		try {
-			const info = parseConnectionDiscovery(fs.readFileSync(filePath, 'utf8'));
-			if (info && info.pid === pid) fs.unlinkSync(filePath);
-		} catch {
-			/* already gone, or never written (e.g. exited before becoming ready) */
-		}
+		withDiscoveryLock(filePath, () => {
+			try {
+				const info = parseConnectionDiscovery(fs.readFileSync(filePath, 'utf8'));
+				if (info && info.pid === pid) fs.unlinkSync(filePath);
+			} catch {
+				/* already gone, or never written (e.g. exited before becoming ready) */
+			}
+		});
 	}
 
 	// =========================================================================

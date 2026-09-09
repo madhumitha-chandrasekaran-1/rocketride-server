@@ -23,14 +23,11 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
-	connectionDiscoveryPath,
-	parseConnectionDiscovery,
-	serializeConnectionDiscovery,
-	isLoopbackDiscoveryUri,
-	CONNECTION_DISCOVERY_FILENAME,
-	type ConnectionDiscoveryInfo,
-} from '../engine/local/connectionDiscovery';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { Worker } from 'node:worker_threads';
+import { connectionDiscoveryPath, parseConnectionDiscovery, serializeConnectionDiscovery, isLoopbackDiscoveryUri, withDiscoveryLock, CONNECTION_DISCOVERY_FILENAME, CONST_DISCOVERY_LOCK_SUFFIX, type ConnectionDiscoveryInfo } from '../engine/local/connectionDiscovery';
 
 const INFO: ConnectionDiscoveryInfo = {
 	uri: 'http://localhost:54321',
@@ -41,10 +38,11 @@ const INFO: ConnectionDiscoveryInfo = {
 // --- connectionDiscoveryPath --------------------------------------------------
 
 test('builds the discovery path under the given engine directory', () => {
-	assert.equal(
-		connectionDiscoveryPath('/Users/dev/Library/Application Support/RocketRide/engine'),
-		`/Users/dev/Library/Application Support/RocketRide/engine/${CONNECTION_DISCOVERY_FILENAME}`,
-	);
+	// path.join() (which connectionDiscoveryPath delegates to) uses '\' on
+	// Windows -- build the expectation the same way rather than hard-coding
+	// a POSIX separator that would fail there.
+	const engineDir = '/Users/dev/Library/Application Support/RocketRide/engine';
+	assert.equal(connectionDiscoveryPath(engineDir), path.join(engineDir, CONNECTION_DISCOVERY_FILENAME));
 });
 
 // --- serializeConnectionDiscovery / parseConnectionDiscovery round-trip ------
@@ -101,9 +99,7 @@ test('returns null when pid is missing, not a number, zero, negative, or fractio
 });
 
 test('ignores unknown extra fields from a future file version', () => {
-	const parsed = parseConnectionDiscovery(
-		JSON.stringify({ ...INFO, someFutureField: 'ignore me' }),
-	);
+	const parsed = parseConnectionDiscovery(JSON.stringify({ ...INFO, someFutureField: 'ignore me' }));
 	assert.deepEqual(parsed, INFO);
 });
 
@@ -135,4 +131,121 @@ test('rejects a non-loopback host', () => {
 test('rejects a malformed URI rather than throwing', () => {
 	assert.equal(isLoopbackDiscoveryUri('not a uri'), false);
 	assert.equal(isLoopbackDiscoveryUri(''), false);
+});
+
+// --- withDiscoveryLock ---------------------------------------------------------
+
+function withTempDiscoveryFile(fn: (filePath: string) => void): void {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rr-discovery-lock-'));
+	try {
+		fn(path.join(dir, CONNECTION_DISCOVERY_FILENAME));
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+test('runs fn and returns its result when the lock is free', () => {
+	withTempDiscoveryFile((filePath) => {
+		const result = withDiscoveryLock(filePath, () => 'ran');
+		assert.equal(result, 'ran');
+	});
+});
+
+test('removes the lock file after fn returns, so a later caller is not blocked', () => {
+	withTempDiscoveryFile((filePath) => {
+		withDiscoveryLock(filePath, () => undefined);
+		assert.equal(fs.existsSync(`${filePath}${CONST_DISCOVERY_LOCK_SUFFIX}`), false);
+
+		const second = withDiscoveryLock(filePath, () => 'second');
+		assert.equal(second, 'second');
+	});
+});
+
+test('removes the lock file even when fn throws', () => {
+	withTempDiscoveryFile((filePath) => {
+		assert.throws(() =>
+			withDiscoveryLock(filePath, () => {
+				throw new Error('boom');
+			})
+		);
+		assert.equal(fs.existsSync(`${filePath}${CONST_DISCOVERY_LOCK_SUFFIX}`), false);
+	});
+});
+
+test('skips fn and returns undefined when an already-held lock is not released in time', () => {
+	withTempDiscoveryFile((filePath) => {
+		// Simulate a concurrent holder: create the lock file ourselves and
+		// never release it.
+		const lockPath = `${filePath}${CONST_DISCOVERY_LOCK_SUFFIX}`;
+		fs.writeFileSync(lockPath, '');
+
+		let ran = false;
+		const result = withDiscoveryLock(filePath, () => (ran = true), { maxWaitMs: 20, staleMs: 60_000 });
+
+		assert.equal(result, undefined);
+		assert.equal(ran, false);
+	});
+});
+
+test('breaks a stale lock left behind by a crashed process, rather than skipping forever', () => {
+	withTempDiscoveryFile((filePath) => {
+		const lockPath = `${filePath}${CONST_DISCOVERY_LOCK_SUFFIX}`;
+		fs.writeFileSync(lockPath, '');
+		// Back-date the lock file so it reads as abandoned.
+		const old = new Date(Date.now() - 10_000);
+		fs.utimesSync(lockPath, old, old);
+
+		const result = withDiscoveryLock(filePath, () => 'ran-after-breaking-stale-lock', {
+			maxWaitMs: 200,
+			staleMs: 1000,
+		});
+
+		assert.equal(result, 'ran-after-breaking-stale-lock');
+	});
+});
+
+function sleepSyncMs(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+test('an already-held lock blocks a second caller until it is released', () => {
+	// withDiscoveryLock is synchronous (Atomics.wait blocks the whole thread,
+	// including the timer queue), so a same-process setTimeout can't release
+	// a lock while a call is busy-waiting on it -- exercise the real
+	// cross-process case with a worker thread holding the lock instead.
+	withTempDiscoveryFile((filePath) => {
+		const lockPath = `${filePath}${CONST_DISCOVERY_LOCK_SUFFIX}`;
+		const holdMs = 150;
+
+		const worker = new Worker(
+			`
+			const fs = require('node:fs');
+			const { workerData } = require('node:worker_threads');
+			fs.writeFileSync(workerData.lockPath, '');
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, workerData.holdMs);
+			fs.unlinkSync(workerData.lockPath);
+			`,
+			{ eval: true, workerData: { lockPath, holdMs } }
+		);
+
+		try {
+			// Poll for the worker to actually create the lock file (thread
+			// startup time varies) before this thread starts trying to acquire
+			// it -- a fixed sleep here would be flaky under CI load.
+			for (let waited = 0; !fs.existsSync(lockPath); waited += 5) {
+				assert.ok(waited < 2000, 'worker should have created the lock file by now');
+				sleepSyncMs(5);
+			}
+
+			// If withDiscoveryLock raced past the still-held lock instead of
+			// waiting for it, `wx` (exclusive create) would have thrown EEXIST
+			// immediately and it would give up well before the worker's
+			// `holdMs` release -- succeeding at all here means it genuinely
+			// waited.
+			const result = withDiscoveryLock(filePath, () => 'ran', { maxWaitMs: 2000, staleMs: 60_000 });
+			assert.equal(result, 'ran');
+		} finally {
+			worker.terminate();
+		}
+	});
 });

@@ -52,8 +52,12 @@
  *
  * These functions are deliberately free of any `vscode` import so they can
  * be unit-tested standalone with `node:test` (see connectionDiscovery.test.ts).
- * The actual filesystem read/write lives in EngineLocal, which already uses
- * `fs` synchronously for its PID files.
+ * The actual read/write of the discovery file's *content* lives in
+ * EngineLocal, which already uses `fs` synchronously for its PID files;
+ * `withDiscoveryLock` below is the one exception -- it wraps that read/write
+ * in a small file-based mutex, and correctness there is worth testing
+ * directly against a real filesystem rather than only indirectly through
+ * EngineLocal (which also needs `vscode`, so isn't `node:test`-able here).
  *
  * Canonical schema, kept in sync by hand across this file and the read side
  * (`packages/client-python/src/rocketride/_connection_discovery.py`; there is
@@ -65,6 +69,7 @@
  * actually a credential invites the next reader to trust it as one.
  */
 
+import * as fs from 'fs';
 import * as path from 'path';
 
 /** Shape of the connection discovery file's contents. */
@@ -156,4 +161,79 @@ export function parseConnectionDiscovery(text: string): ConnectionDiscoveryInfo 
 		pid,
 		updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : '',
 	};
+}
+
+/** Suffix for the discovery file's advisory lock. */
+export const CONST_DISCOVERY_LOCK_SUFFIX = '.lock';
+
+/** Default `maxWaitMs` for `withDiscoveryLock`: how long to keep retrying to
+ * acquire the lock before giving up and skipping the operation (both write
+ * and remove are best-effort; a skipped one under contention is strictly
+ * safer than proceeding unprotected, since the bug this closes is two
+ * processes proceeding unprotected at once). */
+export const CONST_DISCOVERY_LOCK_MAX_WAIT_MS = 200;
+
+/** Default `staleMs` for `withDiscoveryLock`: a lock older than this is
+ * assumed abandoned by a process that crashed while holding it, and is
+ * broken rather than left to wedge every future writer/remover forever. */
+export const CONST_DISCOVERY_LOCK_STALE_MS = 5000;
+
+/**
+ * Best-effort synchronous mutex over the discovery file, so a write (on the
+ * engine becoming ready) and a check-then-delete (on exit) from two
+ * different `EngineLocal` processes -- e.g. two VS Code windows starting and
+ * stopping at nearly the same instant -- can't interleave. Without this, the
+ * gap between `removeConnectionDiscovery`'s read and its `unlinkSync` is
+ * exactly wide enough for a second window's write to land in it, and for the
+ * first window to then delete the second window's now-current entry.
+ *
+ * Uses exclusive file creation (`wx`, i.e. `O_CREAT | O_EXCL`) as the lock
+ * primitive: atomic on both POSIX and Windows, so no extra dependency or
+ * platform-specific code is needed. This only needs to coordinate our own
+ * cooperating processes -- a hostile actor doesn't play along with an
+ * advisory lock anyway; the loopback/proxy checks on the read side are what
+ * defend against an adversarial discovery file, not this.
+ *
+ * `maxWaitMs`/`staleMs` default to the `CONST_DISCOVERY_LOCK_*` constants
+ * above; both are parameters (rather than baked in) so tests can exercise
+ * the give-up and stale-lock-breaking paths without waiting on the real,
+ * production-sized durations.
+ *
+ * Returns `undefined` (without calling `fn`) if the lock couldn't be
+ * acquired within `maxWaitMs`.
+ */
+export function withDiscoveryLock<T>(discoveryFilePath: string, fn: () => T, { maxWaitMs = CONST_DISCOVERY_LOCK_MAX_WAIT_MS, staleMs = CONST_DISCOVERY_LOCK_STALE_MS } = {}): T | undefined {
+	const lockPath = `${discoveryFilePath}${CONST_DISCOVERY_LOCK_SUFFIX}`;
+	const deadline = Date.now() + maxWaitMs;
+	let fd: number | undefined;
+	while (fd === undefined) {
+		try {
+			fd = fs.openSync(lockPath, 'wx');
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return undefined; // e.g. directory gone
+			try {
+				if (Date.now() - fs.statSync(lockPath).mtimeMs > staleMs) {
+					fs.unlinkSync(lockPath); // Break an abandoned lock; loop and retry.
+				}
+			} catch {
+				/* raced with the holder finishing -- fine, loop and retry */
+			}
+			if (Date.now() >= deadline) return undefined;
+			// Brief synchronous pause between attempts rather than a hot spin --
+			// this whole function runs synchronously on the extension host's
+			// main thread, so a tight retry loop would burn CPU there for no
+			// benefit (contention this brief resolves in well under a tick).
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+		}
+	}
+	try {
+		return fn();
+	} finally {
+		fs.closeSync(fd);
+		try {
+			fs.unlinkSync(lockPath);
+		} catch {
+			/* already gone */
+		}
+	}
 }
