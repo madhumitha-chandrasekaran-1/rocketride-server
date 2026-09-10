@@ -248,7 +248,9 @@ class TestClipBuffering:
         inst.instance.writeText.assert_not_called()
 
     def test_write_within_the_cap_is_unaffected(self, monkeypatch):
-        """CodeRabbit on #2132: the real 200MB cap would make this test hold
+        """Shrinks the cap instead of the payload to avoid a ~400MB peak.
+
+        CodeRabbit on #2132: the real 200MB cap would make this test hold
         ~400MB at once (bytearray.extend() copies the input) -- shrink the
         cap instead of the payload so the same boundary math still applies.
         """
@@ -343,9 +345,10 @@ class TestClipBuffering:
 
 
 class TestNoProfileSelector:
-    """Guards the design choice documented in services.json and the
-    README: no `profile` field, so connConfig never carries a `profile` key and
-    every field stays on Config.getNodeConfig's no-profile-key branch. Adding a
+    """Guards the no-profile-selector design choice (see services.json/README).
+
+    No `profile` field, so connConfig never carries a `profile` key and every
+    field stays on Config.getNodeConfig's no-profile-key branch. Adding a
     profile selector later without also nesting fields under profile objects
     would silently reintroduce the #2070 root-drop bug.
     """
