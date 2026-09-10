@@ -27,14 +27,14 @@
 
 /**
  * Regression tests for the Cloud Pipeline Builder stale-content bug
- * (rocketride-org/rocketride-server#2036): `check_connection` -- no, this is
- * `Documents.openDocument` trusting an already-present, clean cache entry
- * forever, even when it no longer matches the backing store. Proven on
- * cloud.rocketride.ai: store v1, open it, overwrite the stored file to v2 via
- * the fs API directly, then close+reopen or hard-reload the browser -- the
- * editor kept showing v1. Publishing the same bytes under a NEW filename
- * showed v2 immediately, which is what pointed at a name-keyed cache rather
- * than a propagation delay.
+ * (rocketride-org/rocketride-server#2036): `Documents.openDocument` (and, for
+ * the hard-reload half of the repro, the constructor's post-restore refresh)
+ * trusting an already-present, clean cache entry forever, even when it no
+ * longer matches the backing store. Proven on cloud.rocketride.ai: store v1,
+ * open it, overwrite the stored file to v2 via the fs API directly, then
+ * close+reopen or hard-reload the browser -- the editor kept showing v1.
+ * Publishing the same bytes under a NEW filename showed v2 immediately, which
+ * is what pointed at a name-keyed cache rather than a propagation delay.
  *
  * The one case worth protecting is a document with genuine unsaved local
  * edits (`dirty: true`) -- that content must never be silently replaced by
@@ -99,14 +99,31 @@ function makeFakeVfs(initial: Record<string, unknown> = {}): {
 	};
 }
 
-/** A DocumentsState as it would come back from persisted workspace appState:
- * a document entry with no active editor referencing it (`editorCount: 0`)
- * and marked clean -- exactly what a hard browser reload restores. */
+/** A DocumentsState as it would come back from persisted workspace appState
+ * with no tab open for the document (`editorCount: 0`, no editor entry) and
+ * marked clean -- e.g. every tab was closed before the session was saved. */
 function makePersistedState(uri: string, content: unknown): DocumentsState {
 	return {
 		documents: { [uri]: { uri, content, dirty: false, version: 1, editorCount: 0, isNew: false } },
 		editors: {},
 		groups: { 'group-1': { id: 'group-1', editorIds: [], activeEditorIndex: -1 } },
+		rootNode: { type: 'leaf', id: 'group-1', groupId: 'group-1' },
+		activeGroupId: 'group-1',
+	};
+}
+
+/** Same as makePersistedState, but with a tab actually open for the document
+ * (`editorCount: 1`, one editor referencing it) -- what a hard browser
+ * reload restores when the document had a live editor at the time of the
+ * reload. Unlike makePersistedState's editorCount: 0, this is the case
+ * #2085's review pointed out openDocument's re-read never covers, since
+ * GroupEditorPane renders state.documents[uri] directly without going
+ * through openDocument on restore. */
+function makePersistedStateWithOpenEditor(uri: string, content: unknown): DocumentsState {
+	return {
+		documents: { [uri]: { uri, content, dirty: false, version: 1, editorCount: 1, isNew: false } },
+		editors: { 'editor-1': { id: 'editor-1', documentUri: uri, scrollTop: 0, scrollLeft: 0, cursorLine: 1, cursorColumn: 1, label: uri } },
+		groups: { 'group-1': { id: 'group-1', editorIds: ['editor-1'], activeEditorIndex: 0 } },
 		rootNode: { type: 'leaf', id: 'group-1', groupId: 'group-1' },
 		activeGroupId: 'group-1',
 	};
@@ -140,9 +157,14 @@ test('closing the last editor of a clean document evicts it, so a later reopen s
 });
 
 test('#2036: a clean document restored from a persisted session is re-read, not trusted forever', async () => {
-	// Simulates surviving a hard browser reload: the constructor restores
-	// documents.['a.pipe'] from persisted appState with the OLD content and
-	// editorCount: 0 (no live editor references it yet in this fresh session).
+	// Simulates the "close all tabs, reopen from the sidebar" half of the
+	// repro: the constructor restores documents.['a.pipe'] from persisted
+	// appState with the OLD content and editorCount: 0 (every tab for it was
+	// closed before the session was saved, so nothing re-opens it on restore
+	// -- that requires an explicit openDocument call, exercised below). The
+	// other half -- a hard reload with a tab still open for it -- is covered
+	// by the next test, since editorCount: 0 here means the constructor's own
+	// post-restore refresh has nothing to do for this uri.
 	const { vfs } = makeFakeVfs({ 'a.pipe': 'v2' }); // the store was updated externally since persistence
 	const docs = new Documents(vfs, makeWorkspace(makePersistedState('a.pipe', 'v1')));
 
@@ -152,6 +174,26 @@ test('#2036: a clean document restored from a persisted session is re-read, not 
 	await docs.openDocument('a.pipe');
 
 	assert.equal(docs.getDocument('a.pipe')?.content, 'v2', 'open must re-read a clean document rather than trust the persisted cache');
+});
+
+test('#2036: a hard reload with a tab still open re-reads the document without an explicit openDocument call', async () => {
+	// The other half of the reported repro, and the one #2085's review found
+	// still unfixed: a hard browser reload restores documents/editors/groups
+	// verbatim (a tab is already open for a.pipe, editorCount: 1) and
+	// GroupEditorPane renders state.documents[uri] directly -- openDocument
+	// is never called on this path, so its re-read fix alone can't reach it.
+	const { vfs } = makeFakeVfs({ 'a.pipe': 'v2' }); // the store was updated externally since persistence
+	const docs = new Documents(vfs, makeWorkspace(makePersistedStateWithOpenEditor('a.pipe', 'v1')));
+
+	// Sanity: the persisted (stale) content is there synchronously, before the
+	// constructor's fire-and-forget post-restore refresh has resolved.
+	assert.equal(docs.getDocument('a.pipe')?.content, 'v1');
+
+	// Flush pending microtasks (the refresh's vfs.read() and the _update() in
+	// its continuation) without depending on Documents exposing that promise.
+	await new Promise((resolve) => setTimeout(resolve, 0));
+
+	assert.equal(docs.getDocument('a.pipe')?.content, 'v2', 'a hard reload with a live editor must re-read a clean document, not trust the persisted cache indefinitely');
 });
 
 test('a document with unsaved edits is never silently replaced by the store', async () => {
@@ -173,25 +215,18 @@ test('a document with unsaved edits is never silently replaced by the store', as
 });
 
 test('a failed re-read falls back to the previously cached content instead of clearing it', async () => {
+	// Persisted-like state with editorCount 0 (a fresh session, nothing else
+	// referencing the cached copy yet) so opening it exercises the re-read
+	// path, but this time the read throws (e.g. a transient network blip).
 	const { vfs, store, failNextRead } = makeFakeVfs({ 'a.pipe': 'v1' });
-	const docs = new Documents(vfs);
-	await docs.openDocument('a.pipe');
-	const [editorId] = Object.keys(docs.getState().editors);
-
-	// Re-open the same document from a persisted-like state with editorCount 0
-	// (simulating a fresh session) so the read path is exercised again, but
-	// this time the read throws (e.g. a transient network blip).
-	docs.closeEditor(editorId!); // fresh close, doc would normally be evicted...
-	// ...so seed it back as if freshly restored, to isolate the failure path
-	// from the eviction behavior already covered above.
-	const docs2 = new Documents(vfs, makeWorkspace(makePersistedState('a.pipe', 'v1')));
+	const docs = new Documents(vfs, makeWorkspace(makePersistedState('a.pipe', 'v1')));
 	failNextRead.add('a.pipe');
 	store.set('a.pipe', 'v2'); // irrelevant: the read will throw before reaching this
 
-	await docs2.openDocument('a.pipe');
+	await docs.openDocument('a.pipe');
 
-	assert.equal(docs2.getDocument('a.pipe')?.content, 'v1', 'a failed read must not wipe out the last known-good content');
-	assert.equal(docs2.getDocument('a.pipe')?.isNew, false, 'a document recovered from cache after a failed read is not "new"');
+	assert.equal(docs.getDocument('a.pipe')?.content, 'v1', 'a failed read must not wipe out the last known-good content');
+	assert.equal(docs.getDocument('a.pipe')?.isNew, false, 'a document recovered from cache after a failed read is not "new"');
 });
 
 test('a cached null content is preserved when a re-read fails, not replaced with empty string', async () => {
@@ -280,4 +315,33 @@ test('discarding a document while its re-read is in flight does not resurrect it
 	assert.equal(docs.getDocument('a.pipe'), undefined, 'a document discarded mid-read must not be resurrected');
 	const remainingEditors = Object.values(docs.getState().editors).filter((e) => e.documentUri === 'a.pipe');
 	assert.equal(remainingEditors.length, 0, 'no editor should be created for a document discarded mid-open');
+});
+
+test('an eviction via closeEditor mid-read does not silently cancel the open, unlike a genuine discard', async () => {
+	// #2085 review: distinct from the discard test above. That one is a real
+	// discardDocument() (backing file deleted from disk) and must NOT
+	// resurrect the document. This is closeEditor() evicting the SAME clean,
+	// now-unreferenced document because its only other tab just closed --
+	// the document and its backing file are still perfectly valid, so this
+	// second open must still succeed instead of silently doing nothing.
+	const { vfs, pauseNextRead, resumeRead } = makeFakeVfs({ 'a.pipe': 'v1' });
+	const docs = new Documents(vfs);
+	await docs.openDocument('a.pipe'); // group-1, editorCount: 1, clean
+	const [firstEditorId] = Object.keys(docs.getState().editors);
+
+	const secondGroup = docs.splitGroup('group-1', 'horizontal');
+	pauseNextRead('a.pipe');
+	const reopen = docs.openDocument('a.pipe', secondGroup); // suspends inside vfs.read()
+
+	docs.closeEditor(firstEditorId!); // last editor for a.pipe in group-1 closes -> evicted (clean, editorCount hits 0)
+	assert.equal(docs.getDocument('a.pipe'), undefined, 'sanity: the document is evicted here, not discarded');
+
+	resumeRead('a.pipe');
+	await reopen;
+
+	assert.equal(docs.getDocument('a.pipe')?.content, 'v1', 'the second open must still succeed after an unrelated eviction, not silently do nothing');
+	const group = docs.getState().groups[secondGroup]!;
+	const editorsForUri = group.editorIds.filter((eid) => docs.getState().editors[eid]?.documentUri === 'a.pipe');
+	assert.equal(editorsForUri.length, 1, 'a tab must actually be created for the second open');
+	assert.equal(docs.getDocument('a.pipe')?.editorCount, 1, 'editorCount must reflect only the surviving second-pane editor');
 });

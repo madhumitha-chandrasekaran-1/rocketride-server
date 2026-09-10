@@ -58,7 +58,15 @@ export interface Document {
 	content: unknown;
 	/** True if the document has unsaved changes. */
 	dirty: boolean;
-	/** Monotonically increasing version counter, bumped on every content change. */
+	/**
+	 * Monotonically increasing version counter. Bumped on every edit, and also
+	 * on every re-read from the VFS (openDocument, or the constructor's
+	 * post-restore refresh) even when the re-read happens to return
+	 * byte-identical content -- there are no consumers outside this file today
+	 * that would be affected by that imprecision, but treat it as "the cache
+	 * was last confirmed/updated at this version," not strictly "content
+	 * changed at this version."
+	 */
 	version: number;
 	/** Number of editors currently viewing this document. */
 	editorCount: number;
@@ -405,6 +413,15 @@ export class Documents {
 	private _editorCounter = 0;
 	private _groupCounter = 1;
 	private _splitCounter = 0;
+	/**
+	 * Per-URI counter bumped by `discardDocument` (never by `closeEditor`'s
+	 * ordinary eviction of a clean, unreferenced document). `openDocument`
+	 * snapshots this at the start of its read and compares it at the end to
+	 * tell the two apart: both leave the document missing from `prev.documents`
+	 * when the read resolves, but only a real discard should stop the read's
+	 * result from being applied.
+	 */
+	private _discardEpoch = new Map<string, number>();
 
 	/**
 	 * Creates a new Documents instance.
@@ -439,6 +456,46 @@ export class Documents {
 		} else {
 			this._state = makeDefaultState();
 		}
+
+		// #2036's actual repro is a hard browser reload, and that never runs
+		// through openDocument: the restore above puts documents/editors/groups
+		// back verbatim, and the editor pane renders state.documents[uri]
+		// directly. Without this, a document with a live editor at restore time
+		// (editorCount > 0) would show its persisted -- possibly stale -- content
+		// forever, exactly like the bug this PR otherwise fixes. Apply the same
+		// trust rule as openDocument (dirty is protected, clean is not) once at
+		// startup instead. A document with no live editor is left alone; it
+		// gets the normal lazy re-read the next time it's actually opened.
+		void this._refreshRestoredDocuments();
+	}
+
+	/**
+	 * Re-reads every clean, VFS-backed, currently-open document once, right
+	 * after a persisted session is restored. See the constructor's call site.
+	 */
+	private async _refreshRestoredDocuments(): Promise<void> {
+		if (!this._vfs) return;
+		const candidates = Object.entries(this._state.documents).filter(([, doc]) => doc.editorCount > 0 && !doc.dirty && !doc.static && !doc.isNew);
+		await Promise.all(
+			candidates.map(async ([uri, initialDoc]) => {
+				let content: unknown;
+				try {
+					const raw = await this._vfs!.read(uri);
+					if (raw === null || raw === undefined) return; // nothing to refresh with -- leave the restored content in place
+					content = raw;
+				} catch {
+					return; // read failed -- leave the restored (stale but present) content in place, same fallback openDocument uses
+				}
+				this._update((prev) => {
+					// Same race guard as openDocument: only apply this read if
+					// nothing else changed the document while it was in flight
+					// (e.g. the user edited or closed it before this resolved).
+					const current = prev.documents[uri];
+					if (current !== initialDoc) return prev;
+					return { ...prev, documents: { ...prev.documents, [uri]: { ...current, content, version: current.version + 1 } } };
+				});
+			})
+		);
 	}
 
 	// --- Internal helpers ----------------------------------------------------
@@ -587,6 +644,9 @@ export class Documents {
 		// silently turning a static panel into a VFS-backed one, or an
 		// unsaved scratch buffer into what looks like a saved file.
 		const initialDoc = s.documents[uri];
+		// Snapshot for the discard-vs-eviction check below, taken alongside
+		// initialDoc so both reflect the same instant.
+		const discardEpochAtStart = this._discardEpoch.get(uri) ?? 0;
 		let doc = initialDoc;
 		if (!doc || (!doc.dirty && !doc.static && !doc.isNew)) {
 			// `doc?.content ?? ''` would be wrong here: a saved document can
@@ -645,15 +705,25 @@ export class Documents {
 			}
 
 			// If this document existed when the read started but is gone now,
-			// something deliberately removed it while the read was in flight --
-			// discardDocument() is the one caller that does this, specifically
-			// because the backing file was deleted from disk. Recreating it
-			// from finalDoc (a read that may have started before the deletion,
-			// or already be racing a since-vanished file) would silently
-			// resurrect a document the system just determined doesn't exist;
-			// respect the removal and abort instead of opening anything.
+			// something removed it while the read was in flight. That has two
+			// causes with opposite correct outcomes, both of which leave the
+			// same missing entry here:
+			//   - discardDocument(): the backing file was deleted from disk.
+			//     Recreating it from finalDoc (a read that may have started
+			//     before the deletion, or already be racing a since-vanished
+			//     file) would silently resurrect a document the system just
+			//     determined doesn't exist -- respect the removal and abort.
+			//   - closeEditor() evicting a now-unreferenced clean document
+			//     (e.g. the user closed this uri's only other tab, in a
+			//     different group, while this open's read was in flight): the
+			//     document and its backing file are both still perfectly
+			//     valid, there's just no cached copy left to compare against.
+			//     Aborting here would silently do nothing -- no tab, no error --
+			//     for a call that should succeed. Fall through and recreate
+			//     from finalDoc instead, same as the "never cached" case.
+			// _discardEpoch (bumped only by discardDocument) tells them apart.
 			const current = prev.documents[uri];
-			if (initialDoc && !current) return prev;
+			if (initialDoc && !current && (this._discardEpoch.get(uri) ?? 0) !== discardEpochAtStart) return prev;
 
 			// Otherwise, prefer this call's (possibly freshly re-read) result,
 			// UNLESS something else changed this document while the read was
@@ -847,6 +917,11 @@ export class Documents {
 		this._update((prev) => {
 			const doc = prev.documents[uri];
 			if (!doc) return prev;
+
+			// Distinguishes this removal from closeEditor's ordinary eviction of
+			// a clean, unreferenced document for any in-flight openDocument read
+			// on this uri -- see `_discardEpoch`'s doc comment.
+			this._discardEpoch.set(uri, (this._discardEpoch.get(uri) ?? 0) + 1);
 
 			// Find and remove all editors for this document
 			const editorIdsToRemove = Object.entries(prev.editors)
