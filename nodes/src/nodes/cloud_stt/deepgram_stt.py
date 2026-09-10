@@ -17,7 +17,14 @@ _HTTP_TIMEOUT_SEC = 120
 
 
 def transcribe(
-    audio: bytes, mime_type: str, *, model: str, language: str, smart_format: bool, punctuate: bool, api_key: str
+    audio: bytes | bytearray,
+    mime_type: str,
+    *,
+    model: str,
+    language: str,
+    smart_format: bool,
+    punctuate: bool,
+    api_key: str,
 ) -> str:
     """POST ``audio`` to Deepgram's /v1/listen and return the transcript text."""
     import requests  # lazy

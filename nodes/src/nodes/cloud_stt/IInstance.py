@@ -22,10 +22,9 @@ from .IGlobal import IGlobal
 # Hard cap on one buffered clip. Cloud vendors take one request per clip (see
 # module docstring), so nothing here is chunked the way audio_transcribe's
 # local processing is -- an unbounded WRITE stream would grow this buffer
-# without limit, and briefly double it again at END's `bytes(self._buffer)`
-# copy. 200MB is generous for real dictation/call-length audio (multiple
-# hours of compressed audio) while still bounding worst-case memory per
-# stream instead of trusting the sender.
+# without limit. 200MB is generous for real dictation/call-length audio
+# (multiple hours of compressed audio) while still bounding worst-case
+# memory per stream instead of trusting the sender.
 _MAX_BUFFER_BYTES = 200 * 1024 * 1024
 
 
@@ -69,7 +68,10 @@ class IInstance(IInstanceBase):
             if not self._buffer:
                 return
             try:
-                text = self.IGlobal.transcribe(bytes(self._buffer), self._mime_type)
+                # `requests` (the only transport any vendor here uses) accepts a
+                # bytearray body directly -- `bytes(self._buffer)` would be a
+                # second full-clip-sized allocation nothing needs.
+                text = self.IGlobal.transcribe(self._buffer, self._mime_type)
             except Exception as e:
                 warning(f'Cloud STT transcription failed: {e}')
                 raise

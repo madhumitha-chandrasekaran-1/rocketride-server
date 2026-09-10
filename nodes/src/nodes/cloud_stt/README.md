@@ -6,14 +6,14 @@ resolved from `logicalType` at runtime). Deepgram is the first (and currently
 only) vendor. Calls go directly from the engine host over HTTPS, **not**
 through the model server.
 
-> Experimental: `services.stt_deepgram.json` marks its Deepgram registration
+> Experimental: `services.json` marks its Deepgram registration
 > `experimental`. The request/response shape is read directly from Deepgram's
 > own API reference, not paraphrased, but has not been exercised against a
 > live account.
 
-| Registration                | Node     | Endpoint                              | Key env             |
-| ---------------------------- | -------- | -------------------------------------- | -------------------- |
-| `services.stt_deepgram.json` | Deepgram | `api.deepgram.com/v1/listen`           | `DEEPGRAM_API_KEY`  |
+| Registration    | Node     | Endpoint                              | Key env             |
+| ---------------- | -------- | -------------------------------------- | -------------------- |
+| `services.json` | Deepgram | `api.deepgram.com/v1/listen`           | `DEEPGRAM_API_KEY`  |
 
 ## What it does
 

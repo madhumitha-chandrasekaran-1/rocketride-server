@@ -85,7 +85,7 @@ class IGlobal(IGlobalBase):
 
         depends(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'requirements.txt'))
 
-    def transcribe(self, audio: bytes, mime_type: str) -> str:
+    def transcribe(self, audio: bytes | bytearray, mime_type: str) -> str:
         """Transcribe ``audio`` (raw bytes, as accumulated from BEGIN/WRITE/END) and
         return the transcript text.
         """

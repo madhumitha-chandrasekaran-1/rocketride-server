@@ -29,7 +29,7 @@ _DIR = Path(__file__).resolve().parents[2] / 'src' / 'nodes' / 'cloud_stt'
 # node packages under src/nodes (see #1687).
 from ..test_contracts import parse_service_json
 
-_SERVICE = 'services.stt_deepgram.json'
+_SERVICE = 'services.json'
 
 
 def _load_modules():
@@ -247,7 +247,12 @@ class TestClipBuffering:
         assert bytes(inst._buffer) == b'chunk-one-chunk-two'
         inst.instance.writeText.assert_not_called()
 
-    def test_write_within_the_cap_is_unaffected(self):
+    def test_write_within_the_cap_is_unaffected(self, monkeypatch):
+        """CodeRabbit on #2132: the real 200MB cap would make this test hold
+        ~400MB at once (bytearray.extend() copies the input) -- shrink the
+        cap instead of the payload so the same boundary math still applies.
+        """
+        monkeypatch.setattr(_ii, '_MAX_BUFFER_BYTES', 1024)
         inst = _instance()
         inst.writeAudio(_ii.AVI_ACTION.BEGIN, 'audio/wav', b'')
 
@@ -255,8 +260,9 @@ class TestClipBuffering:
 
         assert len(inst._buffer) == _ii._MAX_BUFFER_BYTES - 1
 
-    def test_write_exceeding_the_cap_clears_the_buffer_and_raises(self):
+    def test_write_exceeding_the_cap_clears_the_buffer_and_raises(self, monkeypatch):
         """An unbounded clip must fail loudly, not grow the buffer without limit."""
+        monkeypatch.setattr(_ii, '_MAX_BUFFER_BYTES', 1024)
         inst = _instance()
         inst.writeAudio(_ii.AVI_ACTION.BEGIN, 'audio/wav', b'')
         inst.writeAudio(_ii.AVI_ACTION.WRITE, 'audio/wav', b'x' * (_ii._MAX_BUFFER_BYTES - 10))
@@ -267,7 +273,8 @@ class TestClipBuffering:
         assert bytes(inst._buffer) == b''
         inst.IGlobal.transcribe.assert_not_called()
 
-    def test_a_single_write_larger_than_the_cap_raises_from_an_empty_buffer(self):
+    def test_a_single_write_larger_than_the_cap_raises_from_an_empty_buffer(self, monkeypatch):
+        monkeypatch.setattr(_ii, '_MAX_BUFFER_BYTES', 1024)
         inst = _instance()
         inst.writeAudio(_ii.AVI_ACTION.BEGIN, 'audio/wav', b'')
 
@@ -331,12 +338,12 @@ class TestClipBuffering:
 
 
 # ---------------------------------------------------------------------------
-# services.stt_deepgram.json — the no-profile-selector design choice (#2070)
+# services.json — the no-profile-selector design choice (#2070)
 # ---------------------------------------------------------------------------
 
 
 class TestNoProfileSelector:
-    """Guards the design choice documented in services.stt_deepgram.json and the
+    """Guards the design choice documented in services.json and the
     README: no `profile` field, so connConfig never carries a `profile` key and
     every field stays on Config.getNodeConfig's no-profile-key branch. Adding a
     profile selector later without also nesting fields under profile objects
