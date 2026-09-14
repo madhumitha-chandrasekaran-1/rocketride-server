@@ -1,4 +1,4 @@
-# Cloud Speech To Text (`cloud_stt`)
+# cloud_stt
 
 A node directory for cloud STT vendor registrations sharing a single
 `requests`-only engine, mirroring `cloud_tts`'s multi-vendor pattern (vendor
@@ -29,6 +29,13 @@ describing the incoming stream — see `ai.common.avi.descriptor`), not media
 bytes; it is parsed and discarded. Only `WRITE`/`END` payloads carry real
 audio bytes, appended to the buffer in order.
 
+## Lanes
+
+| Lane in | Lane out | Description |
+|---|---|---|
+| `audio` | `text` | Buffered across `BEGIN`/`WRITE`/`END`, sent to the vendor at `END`, transcript written on `text` |
+| `video` | `text` | Same handling as `audio` — the video's audio track is buffered and transcribed |
+
 ## Configuration
 
 No profile selector: Deepgram's model choice needs no nested per-model
@@ -38,11 +45,9 @@ carries a `profile` key here, which keeps every field on
 `Config.getNodeConfig`'s no-profile-key branch (top-level keys read
 directly) instead of the profile branch that silently drops them (see #2070).
 
-## Lanes
+## Notes
 
-`audio`, `video` → `text`.
-
-## Limits
+### Limits
 
 One request per clip, no chunking — the whole buffered clip is sent to
 Deepgram at `END`. A very long recording is one large request rather than a
@@ -53,19 +58,19 @@ nothing here chunks the way `audio_transcribe`'s local processing does. See
 Deepgram's own documented limits for pre-recorded audio for what it accepts
 past that.
 
-## Code layout
+### Code layout
 
 - `IGlobal.py` — resolves the vendor from `logicalType`, holds model/language/feature-flag/key config, dispatches `transcribe`.
 - `deepgram_stt.py` — the Deepgram HTTPS call (`transcribe(audio, mime_type, **opts) -> str`).
 - `IInstance.py` — buffers `BEGIN`/`WRITE`/`END` audio/video into one clip, transcribes at `END`, writes `text`.
 
-## Adding a vendor
+### Adding a vendor
 
 Add `services.<vendor>.json` (with `path: nodes.cloud_stt`), a `<vendor>_stt.py`
 with `transcribe(audio, mime_type, **opts) -> str`, and register it in
 `_ENGINES` in `IGlobal.py`.
 
-## Related nodes
+### Related nodes
 
 - `audio_transcribe` — local Whisper transcription (no vendor key), real-time chunked.
 
