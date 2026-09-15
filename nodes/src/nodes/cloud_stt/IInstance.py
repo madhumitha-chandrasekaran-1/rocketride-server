@@ -36,28 +36,39 @@ class IInstance(IInstanceBase):
     IGlobal: IGlobal
 
     def open(self, object: Entry):
-        """New stream: reset the buffer and descriptor."""
+        """New stream: reset the buffer and failure flag."""
         self._buffer = bytearray()
         self._mime_type = ''
-        self._descriptor = None
+        self._failed = False
 
     def _consume_media(self, action: int, mimeType: str, buffer: bytes):
         """Route one BEGIN/WRITE/END step of an audio or video stream.
 
-        BEGIN parses and discards the stream descriptor (see the module
-        docstring) and resets the buffer. WRITE appends bytes, enforcing
-        ``_MAX_BUFFER_BYTES``. END sends the complete buffered clip to the
-        vendor and writes the resulting transcript.
+        BEGIN parses the stream descriptor (see the module docstring) for its
+        validation side effect and resets the buffer. WRITE appends bytes,
+        enforcing ``_MAX_BUFFER_BYTES``. END sends the complete buffered clip
+        to the vendor and writes the resulting transcript.
+
+        A stream that trips the buffer cap sets ``_failed`` and every
+        subsequent step for that object is a no-op: if the caller keeps
+        delivering WRITE/END frames after the raise instead of abandoning the
+        object, this stops them from silently transcribing just the tail of
+        the clip and writing that as if it were the whole thing.
         """
         if action == AVI_ACTION.BEGIN:
-            self._descriptor = descriptor_from_payload(buffer)
+            descriptor_from_payload(buffer)
             self._buffer = bytearray()
             self._mime_type = mimeType
+            self._failed = False
+            return
+
+        if self._failed:
             return
 
         if buffer:
             if len(self._buffer) + len(buffer) > _MAX_BUFFER_BYTES:
                 self._buffer = bytearray()
+                self._failed = True
                 warning(f'Cloud STT: clip exceeded the {_MAX_BUFFER_BYTES}-byte buffer cap; failing this stream')
                 raise ValueError(f'Cloud STT: clip exceeds the {_MAX_BUFFER_BYTES}-byte limit')
             self._buffer.extend(buffer)

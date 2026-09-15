@@ -39,7 +39,15 @@ def _load_modules():
     into sibling tests running under the full engine (where rocketlib/ai.common
     are real and shared across the pytest session).
     """
-    _core = ('rocketlib', 'ai', 'ai.common', 'ai.common.config', 'ai.common.avi', 'ai.common.avi.descriptor')
+    _core = (
+        'rocketlib',
+        'ai',
+        'ai.common',
+        'ai.common.config',
+        'ai.common.utils',
+        'ai.common.avi',
+        'ai.common.avi.descriptor',
+    )
     _saved = {name: sys.modules.get(name) for name in _core}
 
     rocketlib = types.ModuleType('rocketlib')
@@ -58,6 +66,29 @@ def _load_modules():
     ai_cfg = types.ModuleType('ai.common.config')
     ai_cfg.Config = type('Config', (), {})
     sys.modules['ai.common.config'] = ai_cfg
+
+    # The real `resolve_vendor` (not a stub): loaded by file path so this
+    # picks up ai.common.utils.vendor_resolution without pulling in the rest
+    # of the real `ai` package (whose `__init__.py` needs the engine-only
+    # `depends` module).
+    _vendor_resolution_path = (
+        Path(__file__).resolve().parents[3]
+        / 'packages'
+        / 'ai'
+        / 'src'
+        / 'ai'
+        / 'common'
+        / 'utils'
+        / 'vendor_resolution.py'
+    )
+    _vendor_resolution_spec = importlib.util.spec_from_file_location(
+        'ai.common.utils.vendor_resolution', _vendor_resolution_path
+    )
+    _vendor_resolution = importlib.util.module_from_spec(_vendor_resolution_spec)
+    _vendor_resolution_spec.loader.exec_module(_vendor_resolution)
+    ai_utils = types.ModuleType('ai.common.utils')
+    ai_utils.resolve_vendor = _vendor_resolution.resolve_vendor
+    sys.modules['ai.common.utils'] = ai_utils
 
     sys.modules['ai.common.avi'] = types.ModuleType('ai.common.avi')
     sys.modules['ai.common.avi'].__path__ = []
@@ -283,6 +314,45 @@ class TestClipBuffering:
         with pytest.raises(ValueError, match='exceeds the .* limit'):
             inst.writeAudio(_ii.AVI_ACTION.WRITE, 'audio/wav', b'z' * (_ii._MAX_BUFFER_BYTES + 1))
 
+    def test_frames_after_a_cap_overflow_are_ignored_instead_of_shipping_a_partial_clip(self, monkeypatch):
+        """A caller that keeps streaming after the raise must not get a transcript
+        of just the tail of the clip.
+
+        If whatever drives this instance does not abandon it the moment WRITE
+        raises, further WRITE/END frames for the same object must be no-ops --
+        not silently rebuild a short buffer from the leftover frames and ship
+        that to the vendor as if it were the whole clip.
+        """
+        monkeypatch.setattr(_ii, '_MAX_BUFFER_BYTES', 1024)
+        inst = _instance()
+        inst.writeAudio(_ii.AVI_ACTION.BEGIN, 'audio/wav', b'')
+        inst.writeAudio(_ii.AVI_ACTION.WRITE, 'audio/wav', b'x' * (_ii._MAX_BUFFER_BYTES - 10))
+
+        with pytest.raises(ValueError, match='exceeds the .* limit'):
+            inst.writeAudio(_ii.AVI_ACTION.WRITE, 'audio/wav', b'y' * 20)
+
+        inst.writeAudio(_ii.AVI_ACTION.WRITE, 'audio/wav', b'tail-of-the-clip')
+        inst.writeAudio(_ii.AVI_ACTION.END, 'audio/wav', b'')
+
+        assert bytes(inst._buffer) == b''
+        inst.IGlobal.transcribe.assert_not_called()
+        inst.instance.writeText.assert_not_called()
+
+    def test_begin_after_a_cap_overflow_clears_the_failure_for_the_new_clip(self, monkeypatch):
+        monkeypatch.setattr(_ii, '_MAX_BUFFER_BYTES', 1024)
+        inst = _instance()
+        inst.writeAudio(_ii.AVI_ACTION.BEGIN, 'audio/wav', b'')
+        with pytest.raises(ValueError, match='exceeds the .* limit'):
+            inst.writeAudio(_ii.AVI_ACTION.WRITE, 'audio/wav', b'x' * (_ii._MAX_BUFFER_BYTES + 1))
+
+        inst.IGlobal.transcribe.return_value = 'a fresh clip'
+        inst.writeAudio(_ii.AVI_ACTION.BEGIN, 'audio/wav', b'')
+        inst.writeAudio(_ii.AVI_ACTION.WRITE, 'audio/wav', b'abc')
+        inst.writeAudio(_ii.AVI_ACTION.END, 'audio/wav', b'')
+
+        inst.IGlobal.transcribe.assert_called_once_with(b'abc', 'audio/wav')
+        inst.instance.writeText.assert_called_once_with('a fresh clip')
+
     def test_end_transcribes_the_complete_buffer_and_writes_text(self):
         inst = _instance()
         inst.IGlobal.transcribe.return_value = 'the full transcript'
@@ -368,3 +438,68 @@ class TestNoProfileSelector:
             'stt_deepgram.punctuate',
         ):
             assert field in pipe_props
+
+
+# ---------------------------------------------------------------------------
+# nodes/test/mocks/requests -- the shared passthrough `requests` shadow
+# ---------------------------------------------------------------------------
+
+
+def _load_requests_shadow(monkeypatch):
+    """Import nodes/test/mocks/requests/__init__.py standalone, under its own
+    module name.
+
+    This shadow normally reaches a node's subprocess by ROCKETRIDE_MOCK
+    putting nodes/test/mocks/ at the front of sys.path so `import requests`
+    resolves to it instead of the real package, as the subprocess's very
+    first `import requests` -- see that module's docstring. Loading it here
+    mid-session, after this file's own top-level `import requests` already
+    populated `sys.modules['requests']` (and its submodules), changes that:
+    `_load_real_requests()`'s relative imports (`from .models import
+    Response`, etc.) then resolve against those already-cached submodules
+    instead of running fresh, and the parent-package attributes they'd
+    normally set (`requests.models`, ...) never get attached to the new
+    module object. Clearing the cached `requests`/`requests.*` entries first
+    reproduces the real subprocess's fresh-import condition; monkeypatch
+    restores them afterward so this doesn't affect any other test.
+    """
+    for name in [n for n in sys.modules if n == 'requests' or n.startswith('requests.')]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    init_path = Path(__file__).resolve().parents[2] / 'test' / 'mocks' / 'requests' / '__init__.py'
+    spec = importlib.util.spec_from_file_location('_cloud_stt_requests_shadow', init_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestRequestsShadowPassthrough:
+    """Pins the safety property nodes/test/mocks/requests/__init__.py's
+    docstring claims for sharing this shadow repo-wide: any URL it doesn't
+    explicitly fake must fall through to the real `requests.post`, and the
+    one URL it does fake must never reach the real network.
+    """
+
+    def test_non_deepgram_urls_fall_through_to_the_real_post(self, monkeypatch):
+        shadow = _load_requests_shadow(monkeypatch)
+        monkeypatch.setattr(shadow._real, 'post', Mock(return_value='real-response'))
+
+        result = shadow.post('https://example.com/unrelated', headers={'X': '1'}, data=b'x', timeout=5)
+
+        shadow._real.post.assert_called_once_with(
+            'https://example.com/unrelated', headers={'X': '1'}, data=b'x', timeout=5
+        )
+        assert result == 'real-response'
+
+    def test_the_deepgram_url_never_reaches_the_real_post(self, monkeypatch):
+        shadow = _load_requests_shadow(monkeypatch)
+        monkeypatch.setattr(shadow._real, 'post', Mock(side_effect=AssertionError('must not reach the real network')))
+
+        response = shadow.post(
+            shadow._DEEPGRAM_LISTEN_URL,
+            headers={'Authorization': 'Token abc', 'Content-Type': 'audio/wav'},
+            data=b'audio-bytes',
+        )
+
+        shadow._real.post.assert_not_called()
+        assert response.status_code == 200

@@ -32,11 +32,14 @@ anthropic, qdrant_client, ...) -- see `nodes/test/mocks/__init__.py`. That
 works for nodes that call a vendor SDK, but breaks down for a node like
 `cloud_stt` (Deepgram) that calls the vendor's REST API directly with
 `requests.post(...)` and no SDK at all: there is no vendor-specific package to
-shadow. Confirmed by grepping every other raw-`requests`-based tool/cloud node
-(tool_gohighlevel, tool_slack, tool_pipedrive, cloud_tts's OpenAI/ElevenLabs
-variants) -- none of them have a mock-backed dynamic node-service test either,
-for the same reason. There is also no `responses`/`requests-mock`/`respx`
-dependency in this repo to build one from.
+shadow. `tool_gohighlevel` and `tool_pipedrive` are two other raw-`requests`
+callers with the same gap -- neither has a mock-backed dynamic node-service
+test either -- though both call `requests.request(...)`, not `requests.post`,
+so this module's `post`-only override does not reach them yet (see "Adding a
+new endpoint" below). `tool_slack` is not in this category: it goes through
+`slack_sdk`, not raw `requests`, and already has an SDK to shadow like every
+other entry in `nodes/test/mocks/`. There is also no
+`responses`/`requests-mock`/`respx` dependency in this repo to build one from.
 
 This module is the missing piece: it shadows the `requests` package itself
 (the only thing actually common to every raw-HTTP node), but unlike an SDK
@@ -44,11 +47,16 @@ mock it does NOT stub the whole library -- it loads and re-exports the REAL
 `requests` package as a passthrough baseline, then overrides only `post()` to
 intercept the one URL a given node's mock test cares about (Deepgram's
 `/v1/listen` here) and fall through to the real implementation for anything
-else. That passthrough design is what makes it safe to add as shared,
-repo-wide infrastructure: any other node's subprocess that happens to import
-`requests` under ROCKETRIDE_MOCK (for real, unrelated reasons) still gets real
-network behavior for every URL except the ones a mock module here explicitly
-claims.
+else. `request()`, `get()`, `put()`, `patch()`, `delete()`, and every
+`Session` method are re-exported straight from the real package and are not
+interceptable yet -- a node that calls `requests.request(...)` or uses a
+`Session` needs that overridden first. That passthrough design is what makes
+it safe to add as shared, repo-wide infrastructure: any other node's
+subprocess that happens to import `requests` under ROCKETRIDE_MOCK (for real,
+unrelated reasons) still gets real network behavior for every URL except the
+ones a mock module here explicitly claims -- pinned by
+`TestRequestsShadowPassthrough` in `nodes/test/cloud_stt/test_cloud_stt.py`,
+the one node currently importing this shadow.
 
 Why this can't leak into the live/gated test
 ---------------------------------------------
@@ -62,9 +70,17 @@ pipeline's spawned subprocess env before it starts -- so the live group's
 subprocess never even sees this mock directory on sys.path, and this module
 never loads there. Only the ungated group's subprocess does.
 
-Add a new intercepted endpoint here the same way: match the exact URL (or a
-narrow, defensive prefix match), validate whatever request shape you actually
-care about, and fall through to `_real.post(...)` for everything else.
+Adding a new endpoint
+----------------------
+For a node that calls `requests.post(...)` directly: add a case the same way
+`post()` below does -- match the exact URL (or a narrow, defensive prefix
+match), validate whatever request shape you actually care about, and fall
+through to `_real.post(...)` for everything else.
+
+For a node that calls `requests.request(...)`, uses a `Session`, or calls
+`get`/`put`/`patch`/`delete`, this module has nothing to intercept yet:
+override `request(method, url, *a, **kw)` the same way `post()` does, with
+`post`/`get`/... becoming thin wrappers over it.
 """
 
 import importlib.machinery
