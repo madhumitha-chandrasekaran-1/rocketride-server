@@ -64,8 +64,8 @@ Default: **GLiNER Small - Lightweight general-purpose model** (`glinerSmall`).
 Choose a profile when one of the supplied model choices suits the text you
 process, or choose `custom` and supply a model name. Most pipelines then only
 need to tailor the entity labels and decide whether retaining entity labels in
-the output is useful. The profile selected when adding the node is
-`glinerSmall`; the configuration field itself defaults to `glinerMergedLarge`.
+the output is useful. `glinerSmall` is the default whether the node is added
+from the editor or configured from a hand-written `.pipe`.
 
 ### Model
 
@@ -134,7 +134,7 @@ still redacted.
 | Field | Type | Description | Default |
 |---|---|---|---|
 | `anonymize.model` | `string` | **Model name**<br/>Gliner model to use for anonymization |  |
-| `anonymize.profile` | `string` | **Model**<br/>Anonymize model | `"glinerMergedLarge"` |
+| `anonymize.profile` | `string` | **Model**<br/>Anonymize model | `"glinerSmall"` |
 | `anonymizeChar` | `string` | **Character to use for anonymization**<br/>Character |  |
 
 ## Dependencies
