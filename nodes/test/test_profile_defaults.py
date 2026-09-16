@@ -79,6 +79,7 @@ def _strip_jsonc(raw: str) -> str:
 
 
 def _load_services(path: Path) -> Dict[str, Any]:
+    """Parse a services*.json file (JSONC) into a plain dict."""
     return json.loads(_strip_jsonc(path.read_text(encoding='utf-8')))
 
 
@@ -91,8 +92,11 @@ def _discover_profile_bearing_cases() -> List[Case]:
         for service_file in sorted(node_dir.glob('service*.json')):
             try:
                 svc = _load_services(service_file)
-            except (json.JSONDecodeError, OSError):
-                continue
+            except (json.JSONDecodeError, OSError) as e:
+                # Fail the sweep, not silently skip: a services.json this sweep
+                # cannot even parse is exactly the kind of file that must not
+                # quietly evade the default-consistency check below.
+                raise AssertionError(f'{service_file}: failed to parse as JSONC: {e}') from e
             preconfig = svc.get('preconfig')
             if not isinstance(preconfig, dict) or 'default' not in preconfig:
                 continue
@@ -111,6 +115,7 @@ _CASE_IDS = [f'{node_name}:{field_key}' for node_name, _path, _svc, field_key, _
 
 @pytest.mark.parametrize('case', _CASES, ids=_CASE_IDS)
 def test_preconfig_default_matches_profile_field_default(case: Case):
+    """The two entry points for a node's profile choice must agree (#1953)."""
     node_name, path, svc, field_key, field_def = case
     preconfig_default = svc['preconfig']['default']
     field_default = field_def.get('default')
